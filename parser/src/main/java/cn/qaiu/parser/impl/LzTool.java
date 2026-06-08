@@ -78,19 +78,30 @@ public class LzTool extends PanBase {
         client.getAbs(sUrl)
                 .putHeaders(headers0)
                 .send().onSuccess(res -> {
-                    String html = asText(res);
-                    if (html.contains("var arg1='")) {
-                        webClientSession = WebClientSession.create(clientNoRedirects);
-                        setCookie(html, sUrl);
-                        webClientSession.getAbs(sUrl)
-                                .putHeaders(headers0)
-                                .send().onSuccess(res2 -> {
-                                    String html2 = asText(res2);
-                                    doParser(html2, pwd, sUrl);
-                                });
+                    try {
+                        String html = asText(res);
+                        if (hasAcwArg1(html)) {
+                            webClientSession = WebClientSession.create(clientNoRedirects);
+                            if (!setCookie(html, sUrl)) {
+                                fail("蓝奏云反爬 arg1 Cookie 解析失败，页面内容异常");
+                                return;
+                            }
+                            webClientSession.getAbs(sUrl)
+                                    .putHeaders(headers0)
+                                    .send().onSuccess(res2 -> {
+                                        try {
+                                            String html2 = asText(res2);
+                                            doParser(html2, pwd, sUrl);
+                                        } catch (Exception e) {
+                                            fail("蓝奏云页面响应处理异常: {}", e.getMessage());
+                                        }
+                                    }).onFailure(handleFail(sUrl));
 
-                    } else {
-                        doParser(html, pwd, sUrl);
+                        } else {
+                            doParser(html, pwd, sUrl);
+                        }
+                    } catch (Exception e) {
+                        fail("蓝奏云页面响应处理异常: {}", e.getMessage());
                     }
 
                 }).onFailure(handleFail(sUrl));
@@ -98,22 +109,41 @@ public class LzTool extends PanBase {
     }
 
     private void doParser(String html, String pwd, String sUrl) {
+        if (html == null || html.isBlank()) {
+            fail("蓝奏云页面响应为空");
+            return;
+        }
+        if (isShareCancelledPage(html)) {
+            fail("分享已失效或文件已取消分享");
+            return;
+        }
         // 检测是否为目录分享链接 (含 /s/、/b/ 路径段或 b 开头的路径段)
         if (sUrl.matches(".*/(s|b)/[^/]+.*") || sUrl.matches(".*/b[^/]+.*")) {
             fail("该链接为蓝奏云目录分享，请使用目录解析接口");
             return;
         }
         // 若仍是校验页 (parse()中cookie域名与实际URL不匹配时会出现), 重试一次
-        if (html.contains("var arg1='")) {
+        if (hasAcwArg1(html)) {
             webClientSession = WebClientSession.create(clientNoRedirects);
-            setCookie(html, sUrl);
+            if (!setCookie(html, sUrl)) {
+                fail("蓝奏云反爬 arg1 Cookie 解析失败，页面内容异常");
+                return;
+            }
             webClientSession.getAbs(sUrl).putHeaders(headers0).send().onSuccess(res -> {
-                String html2 = asText(res);
-                if (html2.contains("var arg1='")) {
-                    fail("蓝奏云反爬校验失败，请稍后重试");
-                    return;
+                try {
+                    String html2 = asText(res);
+                    if (isShareCancelledPage(html2)) {
+                        fail("分享已失效或文件已取消分享");
+                        return;
+                    }
+                    if (hasAcwArg1(html2)) {
+                        fail("蓝奏云反爬校验失败，请稍后重试");
+                        return;
+                    }
+                    doParserInternal(html2, pwd, sUrl);
+                } catch (Exception e) {
+                    fail("蓝奏云页面响应处理异常: {}", e.getMessage());
                 }
-                doParserInternal(html2, pwd, sUrl);
             }).onFailure(handleFail(sUrl));
             return;
         }
@@ -121,6 +151,14 @@ public class LzTool extends PanBase {
     }
 
     private void doParserInternal(String html, String pwd, String sUrl) {
+        if (html == null || html.isBlank()) {
+            fail("蓝奏云页面响应为空");
+            return;
+        }
+        if (isShareCancelledPage(html)) {
+            fail("分享已失效或文件已取消分享");
+            return;
+        }
         try {
             setFileInfo(html, shareLinkInfo);
         } catch (Exception e) {
@@ -145,44 +183,60 @@ public class LzTool extends PanBase {
             MultiMap headersCopy = MultiMap.caseInsensitiveMultiMap().addAll(headers0);
             headersCopy.add("Referer", absoluteURI);
             webClientSession.getAbs(absoluteURI).putHeaders(headersCopy).send().onSuccess(res2 -> {
-                String html2 = asText(res2);
-                String jsText = getJsText(html2);
-                if (jsText == null) {
-                    setCookie(html2, absoluteURI);
-                    webClientSession.getAbs(absoluteURI).send().onSuccess(res3 -> {
-                        String html3 = asText(res3);
-                        String jsText3 = getJsText(html3);
-                        if (jsText3 != null) {
-                            try {
-                                ScriptObjectMirror scriptObjectMirror = JsExecUtils.executeDynamicJs(jsText3, null);
-                                getDownURL(sUrl, scriptObjectMirror);
-                            } catch (ScriptException | NoSuchMethodException e) {
-                                fail(e, "引擎执行失败");
-                            }
-                        } else {
-                            fail(SHARE_URL_PREFIX + iframePath + " -> " + sUrl + ": 获取失败0, 可能分享已失效");
-                        }
-                    });
-                } else {
-                    try {
-                        ScriptObjectMirror scriptObjectMirror = JsExecUtils.executeDynamicJs(jsText, null);
-                        getDownURL(sUrl, scriptObjectMirror);
-                    } catch (ScriptException | NoSuchMethodException e) {
-                        fail(e, "js引擎执行失败");
+                try {
+                    String html2 = asText(res2);
+                    if (isShareCancelledPage(html2)) {
+                        fail("分享已失效或文件已取消分享");
+                        return;
                     }
+                    String jsText = getJsText(html2);
+                    if (jsText == null) {
+                        if (!setCookie(html2, absoluteURI)) {
+                            fail("蓝奏云反爬 arg1 Cookie 解析失败，页面内容异常");
+                            return;
+                        }
+                        webClientSession.getAbs(absoluteURI).send().onSuccess(res3 -> {
+                            try {
+                                String html3 = asText(res3);
+                                if (isShareCancelledPage(html3)) {
+                                    fail("分享已失效或文件已取消分享");
+                                    return;
+                                }
+                                String jsText3 = getJsText(html3);
+                                if (jsText3 != null) {
+                                    try {
+                                        ScriptObjectMirror scriptObjectMirror = JsExecUtils.executeDynamicJs(jsText3, null);
+                                        getDownURL(sUrl, scriptObjectMirror);
+                                    } catch (ScriptException | NoSuchMethodException e) {
+                                        fail(e, "引擎执行失败");
+                                    }
+                                } else {
+                                    fail(SHARE_URL_PREFIX + iframePath + " -> " + sUrl + ": 获取失败0, 可能分享已失效");
+                                }
+                            } catch (Exception e) {
+                                fail("蓝奏云 iframe 响应处理异常: {}", e.getMessage());
+                            }
+                        }).onFailure(handleFail(absoluteURI));
+                    } else {
+                        try {
+                            ScriptObjectMirror scriptObjectMirror = JsExecUtils.executeDynamicJs(jsText, null);
+                            getDownURL(sUrl, scriptObjectMirror);
+                        } catch (ScriptException | NoSuchMethodException e) {
+                            fail(e, "js引擎执行失败");
+                        }
+                    }
+                } catch (Exception e) {
+                    fail("蓝奏云 iframe 响应处理异常: {}", e.getMessage());
                 }
             }).onFailure(handleFail(SHARE_URL_PREFIX));
         }
     }
 
-    private void setCookie(String html, String url) {
-        int beginIndex = html.indexOf("arg1='") + 6;
-        int endIndex = html.indexOf("';", beginIndex);
-        if (beginIndex < 6 || endIndex == -1 || endIndex <= beginIndex) {
-            fail("蓝奏云反爬 arg1 Cookie 解析失败，页面内容异常");
-            return;
+    private boolean setCookie(String html, String url) {
+        String arg1 = extractAcwArg1(html);
+        if (arg1 == null) {
+            return false;
         }
-        String arg1 = html.substring(beginIndex, endIndex);
         String acw_sc__v2 = AcwScV2Generator.acwScV2Simple(arg1);
         // 从 URL 中动态提取域名（如 lanzoum.com, lanzoux.com 等）
         String domain = ".lanzn.com"; // 默认兜底
@@ -201,6 +255,7 @@ public class LzTool extends PanBase {
         nettyCookie.setSecure(false);
         nettyCookie.setHttpOnly(false);
         webClientSession.cookieStore().put(nettyCookie);
+        return true;
     }
 
     private String getJsByPwd(String pwd, String html, String subText) {
@@ -218,6 +273,9 @@ public class LzTool extends PanBase {
     }
 
     private String getJsText(String html) {
+        if (html == null) {
+            return null;
+        }
         String jsTagStart = "<script type=\"text/javascript\">";
         String jsTagEnd = "</script>";
         int index = html.lastIndexOf(jsTagStart);
@@ -226,7 +284,36 @@ public class LzTool extends PanBase {
         }
         int startPos = index + jsTagStart.length();
         int endPos = html.indexOf(jsTagEnd, startPos);
+        if (endPos <= startPos) {
+            return null;
+        }
         return html.substring(startPos, endPos).replaceAll("<!--.*-->", "");
+    }
+
+    static String extractAcwArg1(String html) {
+        if (html == null) {
+            return null;
+        }
+        int beginIndex = html.indexOf("arg1='");
+        if (beginIndex < 0) {
+            return null;
+        }
+        beginIndex += 6;
+        int endIndex = html.indexOf("';", beginIndex);
+        if (endIndex <= beginIndex) {
+            return null;
+        }
+        return html.substring(beginIndex, endIndex);
+    }
+
+    static boolean isShareCancelledPage(String html) {
+        return html != null
+                && ((html.contains("来晚啦") && html.contains("取消分享"))
+                || (html.contains("class=\"off\"") && html.contains("取消分享")));
+    }
+
+    private static boolean hasAcwArg1(String html) {
+        return html != null && html.contains("var arg1='");
     }
 
     private void getDownURL(String key, Map<String, ?> obj) {
@@ -278,42 +365,57 @@ public class LzTool extends PanBase {
                 headers.remove("Referer");
                 webClientSession.getAbs(downUrl).putHeaders(headers).send()
                         .onSuccess(res3 -> {
-                            String location = res3.headers().get("Location");
-                            if (location == null) {
-                                String text = asText(res3);
-                                // 使用cookie 再请求一次
-                                headers.add("Referer", downUrl);
-                                int beginIndex = text.indexOf("arg1='") + 6;
-                                String arg1 = text.substring(beginIndex, text.indexOf("';", beginIndex));
-                                String acw_sc__v2 = AcwScV2Generator.acwScV2Simple(arg1);
-                                // 从 downUrl 中动态提取域名
-                                String downDomain = ".lanrar.com";
-                                try {
-                                    java.net.URL du = new java.net.URL(downUrl);
-                                    String h = du.getHost();
-                                    int dot = h.indexOf('.');
-                                    if (dot >= 0) downDomain = h.substring(dot);
-                                } catch (MalformedURLException ignored) {}
-                                // 创建一个 Cookie 并放入 CookieStore
-                                DefaultCookie nettyCookie = new DefaultCookie("acw_sc__v2", acw_sc__v2);
-                                nettyCookie.setDomain(downDomain);
-                                nettyCookie.setPath("/");
-                                nettyCookie.setSecure(false);
-                                nettyCookie.setHttpOnly(false);
-                                WebClientSession webClientSession2 = WebClientSession.create(clientNoRedirects);
-                                webClientSession2.cookieStore().put(nettyCookie);
-                                webClientSession2.getAbs(downUrl).putHeaders(headers).send()
-                                        .onSuccess(res4 -> {
-                                            String location0 = res4.headers().get("Location");
-                                            if (location0 == null) {
-                                                fail(downUrl + " -> 直链获取失败2, 可能分享已失效");
-                                            } else {
-                                                setDateAndComplete(location0);
-                                            }
-                                        }).onFailure(handleFail(downUrl));
-                                return;
+                            try {
+                                String location = res3.headers().get("Location");
+                                if (location == null) {
+                                    String text = asText(res3);
+                                    if (isShareCancelledPage(text)) {
+                                        fail(downUrl + " -> 分享已失效或文件已取消分享");
+                                        return;
+                                    }
+                                    // 使用cookie 再请求一次
+                                    headers.add("Referer", downUrl);
+                                    String arg1 = extractAcwArg1(text);
+                                    if (arg1 == null) {
+                                        fail(downUrl + " -> 蓝奏云反爬 arg1 Cookie 解析失败，可能分享已失效");
+                                        return;
+                                    }
+                                    String acw_sc__v2 = AcwScV2Generator.acwScV2Simple(arg1);
+                                    // 从 downUrl 中动态提取域名
+                                    String downDomain = ".lanrar.com";
+                                    try {
+                                        java.net.URL du = new java.net.URL(downUrl);
+                                        String h = du.getHost();
+                                        int dot = h.indexOf('.');
+                                        if (dot >= 0) downDomain = h.substring(dot);
+                                    } catch (MalformedURLException ignored) {}
+                                    // 创建一个 Cookie 并放入 CookieStore
+                                    DefaultCookie nettyCookie = new DefaultCookie("acw_sc__v2", acw_sc__v2);
+                                    nettyCookie.setDomain(downDomain);
+                                    nettyCookie.setPath("/");
+                                    nettyCookie.setSecure(false);
+                                    nettyCookie.setHttpOnly(false);
+                                    WebClientSession webClientSession2 = WebClientSession.create(clientNoRedirects);
+                                    webClientSession2.cookieStore().put(nettyCookie);
+                                    webClientSession2.getAbs(downUrl).putHeaders(headers).send()
+                                            .onSuccess(res4 -> {
+                                                try {
+                                                    String location0 = res4.headers().get("Location");
+                                                    if (location0 == null) {
+                                                        fail(downUrl + " -> 直链获取失败2, 可能分享已失效");
+                                                    } else {
+                                                        setDateAndComplete(location0);
+                                                    }
+                                                } catch (Exception e) {
+                                                    fail("蓝奏云直链二次响应处理异常: {}", e.getMessage());
+                                                }
+                                            }).onFailure(handleFail(downUrl));
+                                    return;
+                                }
+                                setDateAndComplete(location);
+                            } catch (Exception e) {
+                                fail("蓝奏云直链响应处理异常: {}", e.getMessage());
                             }
-                            setDateAndComplete(location);
                         })
                         .onFailure(handleFail(downUrl));
             } catch (Exception e) {
@@ -354,26 +456,45 @@ public class LzTool extends PanBase {
         String pwd = shareLinkInfo.getSharePassword();
 
         webClientSession.getAbs(sUrl).send().onSuccess(res -> {
-            String html = asText(res);
-            // 检查是否需要 cookie 验证
-            if (html.contains("var arg1='")) {
-                webClientSession = WebClientSession.create(clientNoRedirects);
-                setCookie(html, sUrl);
-                // 重新请求
-                webClientSession.getAbs(sUrl).send().onSuccess(res2 -> {
-                    handleFileListParse(asText(res2), pwd, sUrl, promise);
-                }).onFailure(err -> promise.fail(err));
-                return;
+            try {
+                String html = asText(res);
+                // 检查是否需要 cookie 验证
+                if (hasAcwArg1(html)) {
+                    webClientSession = WebClientSession.create(clientNoRedirects);
+                    if (!setCookie(html, sUrl)) {
+                        promise.tryFail(baseMsg() + "蓝奏云反爬 arg1 Cookie 解析失败，页面内容异常");
+                        return;
+                    }
+                    // 重新请求
+                    webClientSession.getAbs(sUrl).send().onSuccess(res2 -> {
+                        try {
+                            handleFileListParse(asText(res2), pwd, sUrl, promise);
+                        } catch (Exception e) {
+                            promise.tryFail(e);
+                        }
+                    }).onFailure(promise::tryFail);
+                    return;
+                }
+                handleFileListParse(html, pwd, sUrl, promise);
+            } catch (Exception e) {
+                promise.tryFail(e);
             }
-            handleFileListParse(html, pwd, sUrl, promise);
-        }).onFailure(err -> promise.fail(err));
+        }).onFailure(promise::tryFail);
         return promise.future();
     }
 
     private void handleFileListParse(String html, String pwd, String sUrl, Promise<List<FileInfo>> promise) {
+        if (html == null || html.isBlank()) {
+            promise.tryFail(baseMsg() + "蓝奏云页面响应为空");
+            return;
+        }
+        if (isShareCancelledPage(html)) {
+            promise.tryFail(baseMsg() + "分享已失效或文件已取消分享");
+            return;
+        }
         // 检测是否为文件分享链接 (不含 /s/、/b/ 路径段且不含 b 开头的路径段)
         if (!sUrl.matches(".*/(s|b)/[^/]+.*") && !sUrl.matches(".*/b[^/]+.*")) {
-            promise.fail(baseMsg() + "该链接为蓝奏云文件分享，请使用文件解析接口");
+            promise.tryFail(baseMsg() + "该链接为蓝奏云文件分享，请使用文件解析接口");
             return;
         }
         try {
@@ -387,28 +508,43 @@ public class LzTool extends PanBase {
 
             String url = SHARE_URL_PREFIX + "filemoreajax.php?file=" + data.get("fid");
             webClientSession.postAbs(url).putHeaders(headers).sendForm(map).onSuccess(res2 -> {
-                String resBody = asText(res2);
-                // 再次检查是否需要 cookie 验证
-                if (resBody.contains("var arg1='")) {
-                    setCookie(resBody, url);
-                    // 重新请求
-                    webClientSession.postAbs(url).putHeaders(headers).sendForm(map).onSuccess(res3 -> {
-                        handleFileListResponse(asText(res3), promise);
-                    }).onFailure(err -> promise.fail(err));
-                    return;
+                try {
+                    String resBody = asText(res2);
+                    // 再次检查是否需要 cookie 验证
+                    if (hasAcwArg1(resBody)) {
+                        if (!setCookie(resBody, url)) {
+                            promise.tryFail(baseMsg() + "蓝奏云反爬 arg1 Cookie 解析失败，页面内容异常");
+                            return;
+                        }
+                        // 重新请求
+                        webClientSession.postAbs(url).putHeaders(headers).sendForm(map).onSuccess(res3 -> {
+                            try {
+                                handleFileListResponse(asText(res3), promise);
+                            } catch (Exception e) {
+                                promise.tryFail(e);
+                            }
+                        }).onFailure(promise::tryFail);
+                        return;
+                    }
+                    handleFileListResponse(resBody, promise);
+                } catch (Exception e) {
+                    promise.tryFail(e);
                 }
-                handleFileListResponse(resBody, promise);
-            }).onFailure(err -> promise.fail(err));
+            }).onFailure(promise::tryFail);
         } catch (ScriptException | NoSuchMethodException | RuntimeException e) {
-            promise.fail(e);
+            promise.tryFail(e);
         }
     }
 
     private void handleFileListResponse(String responseBody, Promise<List<FileInfo>> promise) {
         try {
+            if (responseBody == null || responseBody.isBlank()) {
+                promise.tryFail(baseMsg() + "蓝奏云文件列表响应为空");
+                return;
+            }
             JsonObject fileListJson = new JsonObject(responseBody);
             if (fileListJson.getInteger("zt") != 1) {
-                promise.fail(baseMsg() + fileListJson.getString("info"));
+                promise.tryFail(baseMsg() + fileListJson.getString("info"));
                 return;
             }
             List<FileInfo> list = new ArrayList<>();
@@ -452,7 +588,7 @@ public class LzTool extends PanBase {
             });
             promise.complete(list);
         } catch (Exception e) {
-            promise.fail(e);
+            promise.tryFail(e);
         }
     }
 

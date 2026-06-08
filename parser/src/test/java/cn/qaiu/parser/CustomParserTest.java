@@ -179,6 +179,41 @@ public class CustomParserTest {
     }
 
     @Test
+    public void testBuiltInParserTakesPrecedenceOverBroadCustomParser() {
+        CustomParserConfig config = CustomParserConfig.builder()
+                .type("broadpan")
+                .displayName("宽泛测试网盘")
+                .toolClass(TestPanTool.class)
+                .matchPattern("https?://([a-zA-Z\\d]+(-[a-zA-Z\\d]+)*\\.)+[a-zA-Z]{2,}/(?<KEY>.+)")
+                .build();
+        CustomParserRegistry.register(config);
+
+        ParserCreate parser = ParserCreate.fromShareUrl("https://url20.ctfile.com/d/12493720-32151037-827af1");
+
+        assertFalse(parser.isCustomParser());
+        assertEquals("ctd", parser.getShareLinkInfo().getType());
+        assertEquals("城通网盘-目录", parser.getShareLinkInfo().getPanName());
+        assertEquals("12493720-32151037-827af1", parser.getShareLinkInfo().getShareKey());
+    }
+
+    @Test
+    public void testCustomParserTakesPrecedenceOverGenericBuiltInParser() {
+        CustomParserConfig config = CustomParserConfig.builder()
+                .type("testpan")
+                .displayName("测试网盘")
+                .toolClass(TestPanTool.class)
+                .matchPattern("https://testpan\\.example\\.com/s/(?<KEY>[^?]+)")
+                .build();
+        CustomParserRegistry.register(config);
+
+        ParserCreate parser = ParserCreate.fromShareUrl("https://testpan.example.com/s/abc123");
+
+        assertTrue(parser.isCustomParser());
+        assertEquals("testpan", parser.getShareLinkInfo().getType());
+        assertEquals("abc123", parser.getShareLinkInfo().getShareKey());
+    }
+
+    @Test
     public void testCustomParserSupportsFromShareUrl() {
         // 测试 supportsFromShareUrl 方法
         CustomParserConfig config1 = CustomParserConfig.builder()

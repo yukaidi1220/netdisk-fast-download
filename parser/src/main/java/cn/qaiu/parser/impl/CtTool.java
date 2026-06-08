@@ -79,10 +79,7 @@ public class CtTool extends PanBase {
         }
         String[] split = shareKey.split("-");
         String uid = split[0], fid = split[1];
-        // 获取url path
-        int i1 = shareLinkInfo.getShareUrl().indexOf("com/");
-        int i2 = shareLinkInfo.getShareUrl().lastIndexOf("/");
-        String path = shareLinkInfo.getShareUrl().substring(i1 + 4, i2);
+        String path = extractPath(shareLinkInfo.getShareUrl());
 
         HttpRequest<Buffer> bufferHttpRequest1 = clientSession.getAbs(UriTemplate.of(API1))
                 .setTemplateParam("path", path)
@@ -167,12 +164,7 @@ public class CtTool extends PanBase {
         // 从分享URL中提取fk参数
         String fk = extractQueryParam(shareUrl, "fk");
 
-        // 从URL中提取path (例如从 "https://url94.ctfile.com/d/xxx?p=..." 中提取 "d")
-        int comIdx = shareUrl.indexOf("com/");
-        int qIdx = shareUrl.indexOf('?');
-        String pathAndKey = qIdx > 0 ? shareUrl.substring(comIdx + 4, qIdx) : shareUrl.substring(comIdx + 4);
-        int slashIdx = pathAndKey.indexOf('/');
-        String path = slashIdx > 0 ? pathAndKey.substring(0, slashIdx) : pathAndKey;
+        String path = extractPath(shareUrl);
 
         clientSession.getAbs(UriTemplate.of(API_GETDIR))
                 .setTemplateParam("path", path)
@@ -274,5 +266,22 @@ public class CtTool extends PanBase {
             }
         }
         return null;
+    }
+
+    static String extractPath(String shareUrl) {
+        int comIdx = shareUrl.indexOf("com/");
+        if (comIdx < 0) {
+            return "";
+        }
+
+        int pathStart = comIdx + 4;
+        int pathEnd = shareUrl.indexOf('/', pathStart);
+        if (pathEnd < 0) {
+            pathEnd = shareUrl.indexOf('?', pathStart);
+        }
+        if (pathEnd < 0) {
+            pathEnd = shareUrl.length();
+        }
+        return shareUrl.substring(pathStart, pathEnd);
     }
 }

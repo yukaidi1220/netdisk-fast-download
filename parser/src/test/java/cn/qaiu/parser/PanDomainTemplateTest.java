@@ -326,6 +326,42 @@ public class PanDomainTemplateTest {
     }
 
     @Test
+    public void testCtDirectoryFromShareUrl() {
+        ParserCreate parserCreate = ParserCreate.fromShareUrl(
+                "https://url20.ctfile.com/d/12493720-32151037-827af1");
+        ShareLinkInfo info = parserCreate.getShareLinkInfo();
+
+        assertNotNull(info);
+        assertEquals("ctd", info.getType());
+        assertEquals("城通网盘-目录", info.getPanName());
+        assertEquals("12493720-32151037-827af1", info.getShareKey());
+        assertEquals("https://ctfile.com/d/12493720-32151037-827af1", info.getStandardUrl());
+    }
+
+    @Test
+    public void testCtDirectoryWithQueryFromShareUrl() {
+        ParserCreate parserCreate = ParserCreate.fromShareUrl(
+                "https://url20.ctfile.com/d/12493720-32151037-827af1?p=7609&d=32151037&fk=827af1");
+        ShareLinkInfo info = parserCreate.getShareLinkInfo();
+
+        assertNotNull(info);
+        assertEquals("ctd", info.getType());
+        assertEquals("12493720-32151037-827af1", info.getShareKey());
+        assertEquals("7609", info.getSharePassword());
+    }
+
+    @Test
+    public void testCtHttpFileFromShareUrl() {
+        ParserCreate parserCreate = ParserCreate.fromShareUrl(
+                "http://url20.ctfile.com/file/12493720-32151037-827af1/");
+        ShareLinkInfo info = parserCreate.getShareLinkInfo();
+
+        assertNotNull(info);
+        assertEquals("ct", info.getType());
+        assertEquals("12493720-32151037-827af1", info.getShareKey());
+    }
+
+    @Test
     public void verifyDuplicates() {
 
         // 校验重复

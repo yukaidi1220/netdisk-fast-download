@@ -8,6 +8,7 @@ import io.vertx.core.json.JsonObject;
 import org.junit.Test;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
@@ -72,6 +73,38 @@ public class CtToolTest {
                 CtTool.buildDirectoryFailureMessage(
                         io.vertx.core.json.JsonObject.of("code", 423),
                         io.vertx.core.json.JsonObject.of("folder_id", 32151037)));
+    }
+
+    @Test
+    public void testBuildFileListParamsUsesAcceptedPageLength() {
+        String params = CtTool.buildFileListParams(0, 200);
+
+        assertTrue(params.contains("iDisplayStart=0"));
+        assertTrue(params.contains("iDisplayLength=200"));
+        assertFalse(params.contains("iDisplayLength=500"));
+    }
+
+    @Test
+    public void testShouldFetchNextFileListPage() {
+        assertTrue(CtTool.shouldFetchNextFileListPage(0, 200, 201));
+        assertFalse(CtTool.shouldFetchNextFileListPage(200, 1, 201));
+        assertFalse(CtTool.shouldFetchNextFileListPage(0, 0, 201));
+    }
+
+    @Test
+    public void testUnexpectedEmptyPageFailsWhenTotalNotReached() {
+        assertTrue(CtTool.isUnexpectedEmptyFileListPage(200, 0, 300));
+        assertFalse(CtTool.isUnexpectedEmptyFileListPage(300, 0, 300));
+        assertFalse(CtTool.isUnexpectedEmptyFileListPage(0, 0, 0));
+    }
+
+    @Test
+    public void testParseFileListTotalAcceptsStringOrFallback() {
+        assertEquals(201, CtTool.parseFileListTotal(new JsonObject()
+                .put("iTotalDisplayRecords", "201")
+                .put("iTotalRecords", 300)));
+        assertEquals(300, CtTool.parseFileListTotal(new JsonObject()
+                .put("iTotalRecords", "300")));
     }
 
     @Test

@@ -55,7 +55,7 @@ public class CtTool extends PanBase {
 
     // DataTables参数，用于获取目录文件列表
     private static final String FILE_LIST_PARAMS_TEMPLATE = "&sEcho=1&iColumns=4&sColumns=%2C%2C%2C" +
-            "&iDisplayStart=%d&iDisplayLength=%d" +
+            "&iDisplayStart={start}&iDisplayLength={length}" +
             "&mDataProp_0=0&sSearch_0=&bRegex_0=false&bSearchable_0=true&bSortable_0=false" +
             "&mDataProp_1=1&sSearch_1=&bRegex_1=false&bSearchable_1=true&bSortable_1=true" +
             "&mDataProp_2=2&sSearch_2=&bRegex_2=false&bSearchable_2=true&bSortable_2=true" +
@@ -203,31 +203,35 @@ public class CtTool extends PanBase {
                 .setTemplateParam("url", shareUrl), shareUrl);
 
         getDirRequest.send().onSuccess(res -> {
-            var resJson = asJson(res);
-            if (resJson == null || resJson.isEmpty()) {
-                listPromise.fail(baseMsg() + " 目录解析失败: 上游返回空响应或非JSON响应");
-                return;
-            }
-            if (!resJson.containsKey("file")) {
-                listPromise.fail(baseMsg() + " 目录解析失败: " + resJson.encode());
-                return;
-            }
-            Object dirInfoValue = resJson.getValue("file");
-            if (!(dirInfoValue instanceof JsonObject)) {
-                listPromise.fail(baseMsg() + " 目录解析失败: file字段格式错误: " + resJson.encode());
-                return;
-            }
-            JsonObject dirInfo = (JsonObject) dirInfoValue;
-            Object fileListUrlValue = dirInfo.getValue("url");
-            String fileListRelUrl = fileListUrlValue instanceof String ? ((String) fileListUrlValue).trim() : "";
-            if (fileListRelUrl.isBlank()) {
-                listPromise.fail(baseMsg() + " " + buildDirectoryFailureMessage(resJson, dirInfo));
-                return;
-            }
+            try {
+                var resJson = asJson(res);
+                if (resJson == null || resJson.isEmpty()) {
+                    failListPromise(listPromise, baseMsg() + " 目录解析失败: 上游返回空响应或非JSON响应");
+                    return;
+                }
+                if (!resJson.containsKey("file")) {
+                    failListPromise(listPromise, baseMsg() + " 目录解析失败: " + resJson.encode());
+                    return;
+                }
+                Object dirInfoValue = resJson.getValue("file");
+                if (!(dirInfoValue instanceof JsonObject)) {
+                    failListPromise(listPromise, baseMsg() + " 目录解析失败: file字段格式错误: " + resJson.encode());
+                    return;
+                }
+                JsonObject dirInfo = (JsonObject) dirInfoValue;
+                Object fileListUrlValue = dirInfo.getValue("url");
+                String fileListRelUrl = fileListUrlValue instanceof String ? ((String) fileListUrlValue).trim() : "";
+                if (fileListRelUrl.isBlank()) {
+                    failListPromise(listPromise, baseMsg() + " " + buildDirectoryFailureMessage(resJson, dirInfo));
+                    return;
+                }
 
-            fetchFileListPage(toCtApiUrl(fileListRelUrl), 0, 0, new ArrayList<>(), listPromise,
-                    shareLinkInfo.getType(), getDomainName(), shareUrl, pwd);
-        }).onFailure(listPromise::fail);
+                fetchFileListPage(toCtApiUrl(fileListRelUrl), 0, 0, new ArrayList<>(), listPromise,
+                        shareLinkInfo.getType(), getDomainName(), shareUrl, pwd);
+            } catch (Exception e) {
+                failListPromise(listPromise, baseMsg() + " 目录解析失败: " + e.getMessage());
+            }
+        }).onFailure(t -> failListPromise(listPromise, t));
 
         return listPromise.future();
     }
@@ -235,59 +239,76 @@ public class CtTool extends PanBase {
     private void fetchFileListPage(String fileListBaseUrl, int start, int pageIndex, List<FileInfo> fileList,
                                    Promise<List<FileInfo>> listPromise, String panType, String domainName,
                                    String shareUrl, String pwd) {
-        if (pageIndex >= MAX_FILE_LIST_PAGES) {
-            listPromise.fail(baseMsg() + " 文件列表解析失败: 分页超过最大限制 " + MAX_FILE_LIST_PAGES
+        try {
+            if (pageIndex >= MAX_FILE_LIST_PAGES) {
+                failListPromise(listPromise, baseMsg() + " 文件列表解析失败: 分页超过最大限制 " + MAX_FILE_LIST_PAGES
+                        + " (start=" + start + ", length=" + FILE_LIST_PAGE_SIZE + ")");
+                return;
+            }
+
+            String fileListUrl = appendQueryParams(fileListBaseUrl,
+                    buildFileListParams(start, FILE_LIST_PAGE_SIZE) + "&_=" + System.currentTimeMillis());
+            withCtAjaxHeaders(clientSession.getAbs(fileListUrl), shareUrl)
+                    .send()
+                    .onSuccess(res -> handleFileListPageResponse(fileListBaseUrl, start, pageIndex, fileList,
+                            listPromise, panType, domainName, shareUrl, pwd, res))
+                    .onFailure(t -> failListPromise(listPromise, t));
+        } catch (Exception e) {
+            failListPromise(listPromise, baseMsg() + " 文件列表解析失败: " + e.getMessage()
                     + " (start=" + start + ", length=" + FILE_LIST_PAGE_SIZE + ")");
-            return;
         }
+    }
 
-        String fileListUrl = appendQueryParams(fileListBaseUrl,
-                buildFileListParams(start, FILE_LIST_PAGE_SIZE) + "&_=" + System.currentTimeMillis());
-        withCtAjaxHeaders(clientSession.getAbs(fileListUrl), shareUrl)
-                .send().onSuccess(res -> {
-                    var listJson = asJson(res);
-                    if (listJson == null || listJson.isEmpty()) {
-                        listPromise.fail(baseMsg() + " 文件列表解析失败: 上游返回空响应或非JSON响应"
-                                + " (start=" + start + ", length=" + FILE_LIST_PAGE_SIZE + ")");
-                        return;
+    private void handleFileListPageResponse(String fileListBaseUrl, int start, int pageIndex, List<FileInfo> fileList,
+                                            Promise<List<FileInfo>> listPromise, String panType, String domainName,
+                                            String shareUrl, String pwd, io.vertx.ext.web.client.HttpResponse<Buffer> res) {
+        try {
+            var listJson = asJson(res);
+            if (listJson == null || listJson.isEmpty()) {
+                failListPromise(listPromise, baseMsg() + " 文件列表解析失败: 上游返回空响应或非JSON响应"
+                        + " (start=" + start + ", length=" + FILE_LIST_PAGE_SIZE + ")");
+                return;
+            }
+            Object aaDataValue = listJson.getValue("aaData");
+            if (!(aaDataValue instanceof JsonArray)) {
+                failListPromise(listPromise, baseMsg() + " 文件列表解析失败: aaData为空: " + listJson.encode());
+                return;
+            }
+            JsonArray aaData = (JsonArray) aaDataValue;
+            for (int i = 0; i < aaData.size(); i++) {
+                try {
+                    Object rowValue = aaData.getValue(i);
+                    if (!(rowValue instanceof JsonArray)) {
+                        log.warn("城通文件列表行格式错误: {}", rowValue);
+                        continue;
                     }
-                    Object aaDataValue = listJson.getValue("aaData");
-                    if (!(aaDataValue instanceof JsonArray)) {
-                        listPromise.fail(baseMsg() + " 文件列表解析失败: aaData为空: " + listJson.encode());
-                        return;
+                    FileInfo fileInfo = parseFileListRow((JsonArray) rowValue, panType,
+                            domainName, shareUrl, pwd);
+                    if (fileInfo != null) {
+                        fileList.add(fileInfo);
                     }
-                    JsonArray aaData = (JsonArray) aaDataValue;
-                    for (int i = 0; i < aaData.size(); i++) {
-                        try {
-                            Object rowValue = aaData.getValue(i);
-                            if (!(rowValue instanceof JsonArray)) {
-                                log.warn("城通文件列表行格式错误: {}", rowValue);
-                                continue;
-                            }
-                            FileInfo fileInfo = parseFileListRow((JsonArray) rowValue, panType,
-                                    domainName, shareUrl, pwd);
-                            if (fileInfo != null) {
-                                fileList.add(fileInfo);
-                            }
-                        } catch (Exception e) {
-                            log.warn("解析文件行失败: {}", e.getMessage());
-                        }
-                    }
+                } catch (Exception e) {
+                    log.warn("解析文件行失败: {}", e.getMessage());
+                }
+            }
 
-                    int nextStart = start + aaData.size();
-                    int total = parseFileListTotal(listJson);
-                    if (isUnexpectedEmptyFileListPage(start, aaData.size(), total)) {
-                        listPromise.fail(baseMsg() + " 文件列表解析失败: 上游返回空分页"
-                                + " (start=" + start + ", total=" + total + ")");
-                        return;
-                    }
-                    if (shouldFetchNextFileListPage(start, aaData.size(), total)) {
-                        fetchFileListPage(fileListBaseUrl, nextStart, pageIndex + 1, fileList,
-                                listPromise, panType, domainName, shareUrl, pwd);
-                    } else {
-                        listPromise.complete(fileList);
-                    }
-                }).onFailure(listPromise::fail);
+            int nextStart = start + aaData.size();
+            int total = parseFileListTotal(listJson);
+            if (isUnexpectedEmptyFileListPage(start, aaData.size(), total)) {
+                failListPromise(listPromise, baseMsg() + " 文件列表解析失败: 上游返回空分页"
+                        + " (start=" + start + ", total=" + total + ")");
+                return;
+            }
+            if (shouldFetchNextFileListPage(start, aaData.size(), total)) {
+                fetchFileListPage(fileListBaseUrl, nextStart, pageIndex + 1, fileList,
+                        listPromise, panType, domainName, shareUrl, pwd);
+            } else {
+                completeListPromise(listPromise, fileList);
+            }
+        } catch (Exception e) {
+            failListPromise(listPromise, baseMsg() + " 文件列表解析失败: " + e.getMessage()
+                    + " (start=" + start + ", length=" + FILE_LIST_PAGE_SIZE + ")");
+        }
     }
 
     @Override
@@ -490,7 +511,9 @@ public class CtTool extends PanBase {
     }
 
     static String buildFileListParams(int start, int length) {
-        return String.format(FILE_LIST_PARAMS_TEMPLATE, Math.max(0, start), Math.max(1, length));
+        return FILE_LIST_PARAMS_TEMPLATE
+                .replace("{start}", String.valueOf(Math.max(0, start)))
+                .replace("{length}", String.valueOf(Math.max(1, length)));
     }
 
     static int parseFileListTotal(JsonObject listJson) {
@@ -521,6 +544,24 @@ public class CtTool extends PanBase {
             return Integer.parseInt(value.toString());
         } catch (NumberFormatException e) {
             return defaultValue;
+        }
+    }
+
+    private static void failListPromise(Promise<List<FileInfo>> listPromise, String message) {
+        if (!listPromise.future().isComplete()) {
+            listPromise.fail(message);
+        }
+    }
+
+    private static void failListPromise(Promise<List<FileInfo>> listPromise, Throwable throwable) {
+        if (!listPromise.future().isComplete()) {
+            listPromise.fail(throwable);
+        }
+    }
+
+    private static void completeListPromise(Promise<List<FileInfo>> listPromise, List<FileInfo> fileList) {
+        if (!listPromise.future().isComplete()) {
+            listPromise.complete(fileList);
         }
     }
 

@@ -81,7 +81,10 @@ public class CtToolTest {
 
         assertTrue(params.contains("iDisplayStart=0"));
         assertTrue(params.contains("iDisplayLength=200"));
+        assertTrue(params.contains("sColumns=%2C%2C%2C"));
         assertFalse(params.contains("iDisplayLength=500"));
+        assertFalse(params.contains("{start}"));
+        assertFalse(params.contains("{length}"));
     }
 
     @Test

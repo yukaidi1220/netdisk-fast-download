@@ -40,13 +40,11 @@ public class CtTool extends PanBase {
     private static final String API1 = API_URL_PREFIX + "/getfile.php?path={path}" +
             "&f={shareKey}&passcode={pwd}&r={rand}&ref=&url={url}";
 
-    // https://webapi.ctfile.com/get_file_url.php?uid=64115194&fid=17569800420720&folder_id=0&
-    // share_id=&file_chk=af5c8757a49cbc69a557eb3da59b246c&start_time=1780471868&wait_seconds=0&
-    // mb=0&app=0&acheck=1&verifycode=1780471868.2951fe63abedf36ec02f34ed5711ce70&rd=0.36350981353622636
-    private static final String API2 = API_URL_PREFIX + "/get_file_url.php?" +
-            "uid={uid}&fid={fid}&folder_id=0&share_id=&file_chk={file_chk}" +
-            "&start_time={start_time}&wait_seconds={wait_seconds}&mb=0&app=0&acheck=1" +
-            "&verifycode={verifycode}&rd={rand}";
+    // https://webapi.ctfile.com/get_down_url.php?uid=64115194&fid=17569800420720&
+    // file_chk=af5c8757a49cbc69a557eb3da59b246c&start_time=1780471868&wait_seconds=0&rd=0.36...
+    private static final String API2 = API_URL_PREFIX + "/get_down_url.php?" +
+            "uid={uid}&fid={fid}&file_chk={file_chk}" +
+            "&start_time={start_time}&wait_seconds={wait_seconds}&rd={rand}";
 
     // https://webapi.ctfile.com/getdir.php?path=d&d=64115194-164803691-48508c&
     // folder_id=164803691&fk=decb36&passcode=7609&r=0.23...&ref=&url=https://url94.ctfile.com/d/...
@@ -99,76 +97,94 @@ public class CtTool extends PanBase {
             fail("shareKey格式不正确: {}", shareKey);
             return promise.future();
         }
-        String uid = split[0], fid = split[1];
+        String fallbackUid = split[0], fallbackFid = split[1];
         String path = extractPath(shareLinkInfo.getShareUrl());
 
-        HttpRequest<Buffer> bufferHttpRequest1 = clientSession.getAbs(UriTemplate.of(API1))
+        HttpRequest<Buffer> bufferHttpRequest1 = withCtAjaxHeaders(clientSession.getAbs(UriTemplate.of(API1))
                 .setTemplateParam("path", path)
                 .setTemplateParam("shareKey", shareKey)
                 .setTemplateParam("pwd", shareLinkInfo.getSharePassword())
                 .setTemplateParam("rand", String.valueOf(Math.random()))
-                .setTemplateParam("url", shareLinkInfo.getShareUrl());
+                .setTemplateParam("url", shareLinkInfo.getShareUrl()), shareLinkInfo.getShareUrl());
 
         bufferHttpRequest1
                 .send().onSuccess(res -> {
-                    var resJson = asJson(res);
-                    Object fileValue = resJson.getValue("file");
-                    if (!(fileValue instanceof JsonObject)) {
-                        fail("解析失败, 文件信息为空或格式错误, 可能分享已失效: {}", resJson);
-                        return;
+                    try {
+                        var resJson = asJson(res);
+                        if (resJson == null || resJson.isEmpty()) {
+                            fail("解析失败, 上游返回空响应或非JSON响应");
+                            return;
+                        }
+                        Object fileValue = resJson.getValue("file");
+                        if (!(fileValue instanceof JsonObject)) {
+                            fail("解析失败, 文件信息为空或格式错误, 可能分享已失效: {}", resJson);
+                            return;
+                        }
+                        var fileJson = (JsonObject) fileValue;
+                        String uid = resolveDownloadUid(fileJson, fallbackUid);
+                        String fid = resolveDownloadFid(fileJson, fallbackFid);
+                        String fileChk = fileJson.getString("file_chk");
+                        String startTime = valueToString(fileJson.getValue("start_time"));
+                        String waitSeconds = valueToString(fileJson.getValue("wait_seconds"));
+                        if (uid.isBlank() || fid.isBlank() || fileChk == null || fileChk.isBlank()
+                                || startTime.isBlank() || waitSeconds.isBlank()) {
+                            fail("解析失败, 下载参数不完整, 可能分享已失效或者分享密码不对: {}", fileJson);
+                            return;
+                        }
+
+                        // 提取文件信息并存储
+                        FileInfo fileInfo = new FileInfo()
+                                .setFileName(fileJson.getString("file_name"))
+                                .setFileId(fid)
+                                .setSizeStr(fileJson.getString("file_size"))
+                                .setCreateTime(fileJson.getString("file_time"))
+                                .setCreateBy(fileJson.getString("username"))
+                                .setFileType("file")
+                                .setPanType(shareLinkInfo.getType());
+                        shareLinkInfo.getOtherParam().put("fileInfo", fileInfo);
+
+                        HttpRequest<Buffer> bufferHttpRequest2 = withCtAjaxHeaders(clientSession.getAbs(UriTemplate.of(API2))
+                                .setTemplateParam("uid", uid)
+                                .setTemplateParam("fid", fid)
+                                .setTemplateParam("file_chk", fileChk)
+                                .setTemplateParam("start_time", startTime)
+                                .setTemplateParam("wait_seconds", waitSeconds)
+                                .setTemplateParam("rand", String.valueOf(Math.random())), shareLinkInfo.getShareUrl());
+                        bufferHttpRequest2
+                                .send().onSuccess(res2 -> handleDownloadUrlResponse(res2))
+                                .onFailure(t -> fail("下载链接请求失败: {}", t.getMessage()));
+                    } catch (Exception e) {
+                        fail("解析失败: {}", e.getMessage());
                     }
-                    var fileJson = (JsonObject) fileValue;
-                    String fileChk = fileJson.getString("file_chk");
-                    String startTime = valueToString(fileJson.getValue("start_time"));
-                    String waitSeconds = valueToString(fileJson.getValue("wait_seconds"));
-                    String verifycode = fileJson.getString("verifycode");
-                    if (fileChk == null || fileChk.isBlank()
-                            || startTime.isBlank() || waitSeconds.isBlank()
-                            || verifycode == null || verifycode.isBlank()) {
-                        fail("解析失败, 下载参数不完整, 可能分享已失效或者分享密码不对: {}", fileJson);
-                        return;
-                    }
-
-                    // 提取文件信息并存储
-                    FileInfo fileInfo = new FileInfo()
-                            .setFileName(fileJson.getString("file_name"))
-                            .setFileId(String.valueOf(fileJson.getLong("file_id", 0L)))
-                            .setSizeStr(fileJson.getString("file_size"))
-                            .setCreateTime(fileJson.getString("file_time"))
-                            .setCreateBy(fileJson.getString("username"))
-                            .setFileType("file")
-                            .setPanType(shareLinkInfo.getType());
-                    shareLinkInfo.getOtherParam().put("fileInfo", fileInfo);
-
-                    HttpRequest<Buffer> bufferHttpRequest2 = clientSession.getAbs(UriTemplate.of(API2))
-                            .setTemplateParam("uid", uid)
-                            .setTemplateParam("fid", fid)
-                            .setTemplateParam("file_chk", fileChk)
-                            .setTemplateParam("start_time", startTime)
-                            .setTemplateParam("wait_seconds", waitSeconds)
-                            .setTemplateParam("verifycode", verifycode)
-                            .setTemplateParam("rand", String.valueOf(Math.random()));
-                    bufferHttpRequest2
-                            .send().onSuccess(res2 -> {
-                                JsonObject resJson2 = asJson(res2);
-                                String downloadUrl = resJson2.getString("downurl");
-                                if (downloadUrl == null || downloadUrl.isBlank()) {
-                                    fail("解析失败, 可能分享已失效: json: {} 字段 {} 不存在", resJson2, "downurl");
-                                    return;
-                                }
-
-                                // 存储下载元数据，包括必要的请求头
-                                Map<String, String> headers = new HashMap<>();
-                                headers.put("User-Agent", BROWSER_UA);
-                                if (shareLinkInfo.getShareUrl() != null && !shareLinkInfo.getShareUrl().isBlank()) {
-                                    headers.put("Referer", shareLinkInfo.getShareUrl());
-                                }
-
-                                // 使用新的 completeWithMeta 方法
-                                completeWithMeta(downloadUrl, headers);
-                            }).onFailure(handleFail(bufferHttpRequest1.queryParams().toString()));
-                }).onFailure(handleFail(bufferHttpRequest1.queryParams().toString()));
+                }).onFailure(t -> fail("文件信息请求失败: {}", t.getMessage()));
         return promise.future();
+    }
+
+    private void handleDownloadUrlResponse(io.vertx.ext.web.client.HttpResponse<Buffer> res) {
+        try {
+            JsonObject resJson = asJson(res);
+            if (resJson == null || resJson.isEmpty()) {
+                fail("解析失败, 下载接口返回空响应或非JSON响应");
+                return;
+            }
+            String downloadUrl = resJson.getString("downurl");
+            if (downloadUrl == null || downloadUrl.isBlank()) {
+                fail("解析失败, 可能分享已失效: json: {} 字段 {} 不存在", resJson, "downurl");
+                return;
+            }
+
+            // 存储下载元数据，包括必要的请求头
+            Map<String, String> headers = new HashMap<>();
+            headers.put("User-Agent", BROWSER_UA);
+            if (shareLinkInfo.getShareUrl() != null && !shareLinkInfo.getShareUrl().isBlank()) {
+                headers.put("Referer", shareLinkInfo.getShareUrl());
+            }
+
+            // 使用新的 completeWithMeta 方法
+            completeWithMeta(downloadUrl, headers);
+        } catch (Exception e) {
+            fail("解析失败, 下载接口响应处理异常: {}", e.getMessage());
+        }
     }
 
     @Override
@@ -338,6 +354,14 @@ public class CtTool extends PanBase {
         shareLinkInfo.setShareUrl(SHARE_FILE_URL_PREFIX + fileShareKey);
         shareLinkInfo.setStandardUrl(SHARE_FILE_URL_PREFIX + fileShareKey);
         return true;
+    }
+
+    static String resolveDownloadUid(JsonObject fileJson, String fallbackUid) {
+        return firstNonBlank(valueToString(fileJson.getValue("userid")), fallbackUid);
+    }
+
+    static String resolveDownloadFid(JsonObject fileJson, String fallbackFid) {
+        return firstNonBlank(valueToString(fileJson.getValue("file_id")), fallbackFid);
     }
 
     private HttpRequest<Buffer> withCtAjaxHeaders(HttpRequest<Buffer> request, String shareUrl) {

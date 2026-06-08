@@ -179,6 +179,16 @@ public class CtToolTest {
     }
 
     @Test
+    public void testResolveDownloadIdsPreferFileJsonForTempdirShareKey() {
+        JsonObject fileJson = new JsonObject()
+                .put("userid", 12493720)
+                .put("file_id", 8734553644L);
+
+        assertEquals("12493720", CtTool.resolveDownloadUid(fileJson, "tempdir"));
+        assertEquals("8734553644", CtTool.resolveDownloadFid(fileJson, "encoded-token"));
+    }
+
+    @Test
     public void testParseInvalidRowReturnsNull() {
         assertNull(CtTool.parseFileListRow(JsonArray.of("bad"), "ctd", "", "", ""));
     }

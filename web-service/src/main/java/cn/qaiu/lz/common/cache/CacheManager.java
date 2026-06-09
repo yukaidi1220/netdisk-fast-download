@@ -24,12 +24,20 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class CacheManager {
+    private static final int MAX_SHARE_KEY_LENGTH = 1024;
+
     private final Pool jdbcPool = JDBCPoolInit.instance().getPool();
     private final JDBCType jdbcType = JDBCPoolInit.instance().getType();
 
     private static final Logger LOGGER = LoggerFactory.getLogger(CacheManager.class);
 
     public Future<CacheLinkInfo> get(String cacheKey) {
+        if (isOversizedShareKey(cacheKey)) {
+            LOGGER.warn("缓存key过长，跳过缓存读取: length={}, prefix={}",
+                    cacheKey.length(), previewShareKey(cacheKey));
+            return Future.succeededFuture(new CacheLinkInfo(JsonObject.of("cacheHit", false, "shareKey", cacheKey)));
+        }
+
         String sql = "SELECT share_key as shareKey, direct_link as directLink, expiration FROM cache_link_info WHERE share_key = #{share_key}";
         String sql2 = "SELECT * FROM pan_file_info WHERE share_key = #{share_key}";
         Map<String, Object> params = new HashMap<>();
@@ -69,6 +77,17 @@ public class CacheManager {
 
     // 插入或更新缓存数据
     public void cacheShareLink(CacheLinkInfo cacheLinkInfo) {
+        if (cacheLinkInfo == null) {
+            LOGGER.warn("缓存信息为空，跳过缓存写入");
+            return;
+        }
+        if (isOversizedShareKey(cacheLinkInfo.getShareKey())) {
+            String shareKey = cacheLinkInfo.getShareKey();
+            LOGGER.warn("缓存key过长，跳过缓存写入: length={}, prefix={}",
+                    shareKey.length(), previewShareKey(shareKey));
+            return;
+        }
+
         String sql;
         if (jdbcType == JDBCType.MySQL) {
             sql = """
@@ -136,6 +155,12 @@ public class CacheManager {
 
     // 写入网盘厂商API解析次数
     public Future<Integer> updateTotalByField(String shareKey, CacheTotalField field) {
+        if (isOversizedShareKey(shareKey)) {
+            LOGGER.warn("缓存key过长，跳过统计写入: length={}, prefix={}",
+                    shareKey.length(), previewShareKey(shareKey));
+            return Future.succeededFuture(0);
+        }
+
         Promise<Integer> promise = Promise.promise();
         String fieldLower = field.name().toLowerCase();
         String sql;
@@ -184,6 +209,12 @@ public class CacheManager {
     }
 
     public Future<Integer> getShareKeyTotal(String shareKey, String name) {
+        if (isOversizedShareKey(shareKey)) {
+            LOGGER.warn("缓存key过长，跳过统计读取: length={}, prefix={}",
+                    shareKey.length(), previewShareKey(shareKey));
+            return Future.succeededFuture(null);
+        }
+
         String sql = """
                 SELECT `share_key`, SUM({total_name}) AS sum_num
                 FROM `api_statistics_info`
@@ -381,6 +412,12 @@ public class CacheManager {
     }
 
     public Future<Map<String, Integer>> getShareKeyTotal(String shareKey) {
+        if (isOversizedShareKey(shareKey)) {
+            LOGGER.warn("缓存key过长，跳过统计读取: length={}, prefix={}",
+                    shareKey.length(), previewShareKey(shareKey));
+            return Future.succeededFuture(null);
+        }
+
         String sql = """
                 SELECT `share_key`, SUM(cache_hit_total) AS hit_total, SUM(api_parser_total) AS parser_total
                 FROM `api_statistics_info`
@@ -409,6 +446,18 @@ public class CacheManager {
                     LOGGER.error("getShareKeyTotal0: ", e);
                 });
         return promise.future();
+    }
+
+    private static boolean isOversizedShareKey(String shareKey) {
+        return shareKey != null && shareKey.length() > MAX_SHARE_KEY_LENGTH;
+    }
+
+    private static String previewShareKey(String shareKey) {
+        if (shareKey == null) {
+            return "";
+        }
+        int maxLength = 120;
+        return shareKey.length() <= maxLength ? shareKey : shareKey.substring(0, maxLength) + "...";
     }
 
 }

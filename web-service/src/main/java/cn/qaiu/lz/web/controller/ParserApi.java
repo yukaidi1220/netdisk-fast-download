@@ -95,7 +95,12 @@ public class ParserApi {
     public Future<LinkInfoResp> parse(HttpServerRequest request, String pwd, String auth) {
         Promise<LinkInfoResp> promise = Promise.promise();
         String url = URLParamUtil.parserParams(request);
-        ParserCreate parserCreate = ParserCreate.fromShareUrl(url).setShareLinkInfoPwd(pwd);
+        ParserCreate parserCreate;
+        try {
+            parserCreate = ParserCreate.fromShareUrl(url).setShareLinkInfoPwd(pwd);
+        } catch (Exception e) {
+            return Future.failedFuture(e);
+        }
         ShareLinkInfo shareLinkInfo = parserCreate.getShareLinkInfo();
         
         // 构建链接信息响应，如果有 auth 参数则附加到链接中
@@ -156,7 +161,12 @@ public class ParserApi {
     @RouteMapping("/getFileList")
     public Future<List<FileInfo>> getFileList(HttpServerRequest request, String pwd, String dirId, String uuid) {
         String url = URLParamUtil.parserParams(request);
-        ParserCreate parserCreate = ParserCreate.fromShareUrl(url).setShareLinkInfoPwd(pwd);
+        ParserCreate parserCreate;
+        try {
+            parserCreate = ParserCreate.fromShareUrl(url).setShareLinkInfoPwd(pwd);
+        } catch (Exception e) {
+            return Future.failedFuture(e);
+        }
         String linkPrefix = getLinkPrefix(request);
         parserCreate.getShareLinkInfo().getOtherParam().put("domainName", linkPrefix);
         parserCreate.getShareLinkInfo().getOtherParam().put("_requestOrigin", linkPrefix);

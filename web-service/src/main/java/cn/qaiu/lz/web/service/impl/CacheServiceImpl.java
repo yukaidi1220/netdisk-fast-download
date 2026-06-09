@@ -279,7 +279,12 @@ public class CacheServiceImpl implements CacheService {
 
     @Override
     public Future<CacheLinkInfo> getCachedByShareUrlAndPwd(String shareUrl, String pwd, JsonObject otherParam) {
-        ParserCreate parserCreate = ParserCreate.fromShareUrl(shareUrl).setShareLinkInfoPwd(pwd);
+        ParserCreate parserCreate;
+        try {
+            parserCreate = ParserCreate.fromShareUrl(shareUrl).setShareLinkInfoPwd(pwd);
+        } catch (Exception e) {
+            return Future.failedFuture(e);
+        }
         parserCreate.getShareLinkInfo().getOtherParam().putAll(otherParam.getMap());
         
         // 检查是否有临时认证参数

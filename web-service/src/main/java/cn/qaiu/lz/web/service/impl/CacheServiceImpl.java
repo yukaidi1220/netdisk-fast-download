@@ -272,7 +272,12 @@ public class CacheServiceImpl implements CacheService {
 
     @Override
     public Future<CacheLinkInfo> getCachedByShareKeyAndPwd(String type, String shareKey, String pwd, JsonObject otherParam) {
-        ParserCreate parserCreate = ParserCreate.fromType(type).shareKey(shareKey).setShareLinkInfoPwd(pwd);
+        ParserCreate parserCreate;
+        try {
+            parserCreate = ParserCreate.fromType(type).shareKey(shareKey).setShareLinkInfoPwd(pwd);
+        } catch (Exception e) {
+            return Future.failedFuture(e);
+        }
         parserCreate.getShareLinkInfo().getOtherParam().putAll(otherParam.getMap());
         return getAndSaveCachedShareLink(parserCreate);
     }

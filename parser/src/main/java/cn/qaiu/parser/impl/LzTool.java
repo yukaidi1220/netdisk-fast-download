@@ -24,6 +24,8 @@ import javax.script.ScriptException;
 import java.io.ByteArrayInputStream;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -100,6 +102,12 @@ public class LzTool extends PanBase {
     private static final Pattern P_DATA_KV = Pattern.compile("'(\\w+)'\\s*:\\s*('(?:\\\\'|[^'])*'|\\d+|\\w+)");
     /** CDN 直链里的 yyyy/mm/dd 分享日期 */
     private static final Pattern P_URL_DATE = Pattern.compile("\\d{4}/\\d{1,2}/\\d{1,2}");
+    /** 蓝奏列表里的相对时间，如 "5分钟前" / "几小时前" */
+    private static final Pattern P_RELATIVE_TIME = Pattern.compile("^(\\d+|几)\\s*(分钟|小时)前$");
+    /** 绝对日期，兼容 2024-01-02 / 2024/1/2 / 2024年1月2日 */
+    private static final Pattern P_DATE = Pattern.compile("^(\\d{4})\\s*[-/年]\\s*(\\d{1,2})\\s*[-/月]\\s*(\\d{1,2})\\s*日?$");
+    /** 无年份的 "1月2日"，按当前年份补全 */
+    private static final Pattern P_MONTH_DAY = Pattern.compile("^(\\d{1,2})\\s*月\\s*(\\d{1,2})\\s*日?$");
     private static final Pattern P_INLINE_SCRIPT =
             Pattern.compile("(?is)<script(?![^>]*\\bsrc\\s*=)[^>]*>(.*?)</script>");
     private static final Pattern P_FI_NAME =
@@ -1122,9 +1130,49 @@ public class LzTool extends PanBase {
         // 分享时间 提取url中的时间戳格式：lanzoui.com/abc/abc/yyyy/mm/dd/
         Matcher matcher = P_URL_DATE.matcher(downloadUrl);
         if (matcher.find() && shareLinkInfo.getOtherParam().get("fileInfo") instanceof FileInfo fileInfo) {
-            fileInfo.setCreateTime(matcher.group().replace("/", "-"));
+            fileInfo.setCreateTime(parseLanzouFileTime(matcher.group()));
         }
         complete(downloadUrl);
+    }
+
+    /**
+     * 蓝奏页面时间归一化为 yyyy-MM-dd。列表里可能是 "5分钟前"、"几小时前"、"1月2日" 等相对或缺年份的写法，
+     * 直接落库会让前端显示成无意义时间；无法识别的写法原样返回，不做猜测。
+     */
+    private static String parseLanzouFileTime(String timeText) {
+        if (timeText == null || timeText.isBlank()) {
+            return timeText;
+        }
+        String normalized = timeText.trim().replaceAll("\\s+", " ");
+        Matcher matcher = P_RELATIVE_TIME.matcher(normalized);
+        if (matcher.matches()) {
+            int amount = "几".equals(matcher.group(1)) ? 1 : Integer.parseInt(matcher.group(1));
+            String unit = matcher.group(2);
+            LocalDateTime time = LocalDateTime.now();
+            if ("小时".equals(unit)) {
+                time = time.minusHours(amount);
+            } else {
+                time = time.minusMinutes(amount);
+            }
+            return time.toLocalDate().toString();
+        }
+        matcher = P_DATE.matcher(normalized);
+        if (matcher.matches()) {
+            return LocalDate.of(
+                    Integer.parseInt(matcher.group(1)),
+                    Integer.parseInt(matcher.group(2)),
+                    Integer.parseInt(matcher.group(3))
+            ).toString();
+        }
+        matcher = P_MONTH_DAY.matcher(normalized);
+        if (matcher.matches()) {
+            return LocalDate.of(
+                    LocalDate.now().getYear(),
+                    Integer.parseInt(matcher.group(1)),
+                    Integer.parseInt(matcher.group(2))
+            ).toString();
+        }
+        return normalized;
     }
 
     /** 目录列表 filemoreajax.php 用移动端 UA。 */
@@ -1294,7 +1342,7 @@ public class LzTool extends PanBase {
                 String param = CommonUtils.urlBase64Encode(paramJson.encode());
                 fileInfo.setFileName(fileName)
                         .setFileId(id)
-                        .setCreateTime(fileJson.getString("time"))
+                        .setCreateTime(parseLanzouFileTime(fileJson.getString("time")))
                         .setFileType(fileJson.getString("icon"))
                         .setSizeStr(fileJson.getString("size"))
                         .setSize(sizeNum)
@@ -1369,7 +1417,7 @@ public class LzTool extends PanBase {
                     .setDescription(CommonUtils.extract(html, P_FI_DESC))
                     .setFileType("file")
                     .setFileId(CommonUtils.extract(html, P_FI_ID))
-                    .setCreateTime(CommonUtils.extract(html, P_FI_TIME));
+                    .setCreateTime(parseLanzouFileTime(CommonUtils.extract(html, P_FI_TIME)));
             if (sizeStr != null && !sizeStr.isBlank()) {
                 long bytes = FileSizeConverter.convertToBytes(sizeStr);
                 fileInfo.setSize(bytes).setSizeStr(FileSizeConverter.convertToReadableSize(bytes));

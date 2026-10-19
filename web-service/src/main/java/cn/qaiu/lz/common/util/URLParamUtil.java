@@ -68,9 +68,10 @@ public class URLParamUtil {
         boolean firstParam = !decodedUrl.contains("?");
 
         for (String paramName : params.names()) {
-            // 忽略 "url", "pwd", "dirId", "uuid", "auth" 参数（这些参数单独处理，不应拼接到分享URL中）
-            if (!paramName.equals("url") && !paramName.equals("pwd") && !paramName.equals("dirId") 
-                    && !paramName.equals("uuid") && !paramName.equals("auth")) {
+            // 忽略单独处理的参数，不应拼接到分享URL中
+            if (!paramName.equals("url") && !paramName.equals("pwd") && !paramName.equals("dirId")
+                    && !paramName.equals("uuid") && !paramName.equals("auth")
+                    && !paramName.equals("stoken") && !paramName.equals("zml")) {
                 if (firstParam) {
                     urlBuilder.append("?");
                     firstParam = false;
@@ -100,21 +101,27 @@ public class URLParamUtil {
             }
         }
         if (localMap.containsKey(ConfigConstant.AUTHS)) {
-            JsonObject auths = (JsonObject) localMap.get(ConfigConstant.AUTHS);
-            if (auths.containsKey(type)) {
-                // 需要处理引号
-                MultiMap entries = MultiMap.caseInsensitiveMultiMap();
-                JsonObject jsonObject = auths.getJsonObject(type);
-                if (jsonObject != null) {
-                    jsonObject.forEach(entity -> {
-                        if (entity == null || entity.getValue() == null) {
-                            return;
-                        }
-                        entries.set(entity.getKey(), entity.getValue().toString());
-                    });
-                }
+            // 如果本次请求已经通过 auth 临时参数（个人配置/捐赠账号）设置过认证信息，
+            // 则不要再用后台 app-dev.yml 的静态配置覆盖，否则临时认证会被静默清空/替换为空配置。
+            boolean tempAuthAdded = Boolean.TRUE.equals(
+                    parserCreate.getShareLinkInfo().getOtherParam().get("__TEMP_AUTH_ADDED"));
+            if (!tempAuthAdded) {
+                JsonObject auths = (JsonObject) localMap.get(ConfigConstant.AUTHS);
+                if (auths.containsKey(type)) {
+                    // 需要处理引号
+                    MultiMap entries = MultiMap.caseInsensitiveMultiMap();
+                    JsonObject jsonObject = auths.getJsonObject(type);
+                    if (jsonObject != null) {
+                        jsonObject.forEach(entity -> {
+                            if (entity == null || entity.getValue() == null) {
+                                return;
+                            }
+                            entries.set(entity.getKey(), entity.getValue().toString());
+                        });
+                    }
 
-                parserCreate.getShareLinkInfo().getOtherParam().put(ConfigConstant.AUTHS, entries);
+                    parserCreate.getShareLinkInfo().getOtherParam().put(ConfigConstant.AUTHS, entries);
+                }
             }
         }
 

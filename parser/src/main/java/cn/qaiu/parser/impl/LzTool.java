@@ -1,27 +1,37 @@
 package cn.qaiu.parser.impl;
 
+import cn.qaiu.WebClientVertxInit;
 import cn.qaiu.entity.FileInfo;
 import cn.qaiu.entity.ShareLinkInfo;
 import cn.qaiu.parser.PanBase;
 import cn.qaiu.util.*;
 import io.netty.handler.codec.http.cookie.DefaultCookie;
 import io.vertx.core.Future;
+import io.vertx.core.Handler;
 import io.vertx.core.MultiMap;
 import io.vertx.core.Promise;
+import io.vertx.core.buffer.Buffer;
 import io.vertx.core.json.JsonObject;
+import io.vertx.core.net.ProxyOptions;
+import io.vertx.core.net.ProxyType;
+import io.vertx.ext.web.client.HttpResponse;
 import io.vertx.ext.web.client.WebClient;
+import io.vertx.ext.web.client.WebClientOptions;
 import io.vertx.ext.web.client.WebClientSession;
 import org.openjdk.nashorn.api.scripting.ScriptObjectMirror;
 
 import javax.script.ScriptException;
-import java.net.MalformedURLException;
-import java.time.LocalDate;
-import java.time.LocalDateTime;
+import java.io.ByteArrayInputStream;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.zip.GZIPInputStream;
 
 /**
  * 蓝奏云解析工具
@@ -30,231 +40,540 @@ import java.util.regex.Pattern;
  */
 public class LzTool extends PanBase {
 
-    WebClientSession webClientSession = WebClientSession.create(clientNoRedirects);
+    private final WebClientSession webClientSession;
 
+    /**
+     * 没有原始分享页主机时才使用（目录内文件 ID、shareKey 占位）。
+     * 与 PanDomainTemplate.LZ 标准模板一致：{@code https://w1.lanzn.com/{shareKey}}。
+     * 已有分享页不要改写到 wwww.lanzoux.com，部分出口连四个 w 的域名会超时。
+     */
     public static final String SHARE_URL_PREFIX = "https://w1.lanzn.com/";
-
-    // 静态编译的正则表达式，避免每次调用都重新编译
-    private static final Pattern FILE_NAME_PATTERN = Pattern.compile("padding: 56px 0px 20px 0px;\">(.*?)<|filenajax\">(.*?)<");
-    private static final Pattern FILE_SIZE_PATTERN = Pattern.compile(">文件大小：</span>(.*?)<br>|\"n_filesize\">大小：(.*?)</div>");
-    private static final Pattern SHARE_USER_PATTERN = Pattern.compile(">分享用户：</span><font>(.*?)</font>|获取<span>(.*?)</span>的文件|\"user-name\">(.*?)</");
-    private static final Pattern DESCRIPTION_PATTERN = Pattern.compile("(?s)文件描述：</span><br>(.*?)</td>|class=\"n_box_des\">(.*?)</div>");
-    private static final Pattern FILE_ID_PATTERN = Pattern.compile("\\?f=(.*?)&|fid = (.*?);");
-    private static final Pattern CREATE_TIME_PATTERN = Pattern.compile(">上传时间：</span>(.*?)<");
-    private static final Pattern URL_DATE_PATTERN = Pattern.compile("(\\d{4}/\\d{1,2}/\\d{1,2})");
-    private static final Pattern ARG1_PATTERN = Pattern.compile("var arg1='([^']+)'");
-    private static final Pattern IFRAME_SRC_PATTERN = Pattern.compile("src=\"(/fn\\?[a-zA-Z\\d_+/=]{16,})\"");
-    private static final Pattern RELATIVE_TIME_PATTERN = Pattern.compile("^(\\d+|几)\\s*(分钟|小时)前$");
-    private static final Pattern DATE_PATTERN = Pattern.compile("^(\\d{4})\\s*[-/年]\\s*(\\d{1,2})\\s*[-/月]\\s*(\\d{1,2})\\s*日?$");
-    private static final Pattern MONTH_DAY_PATTERN = Pattern.compile("^(\\d{1,2})\\s*月\\s*(\\d{1,2})\\s*日?$");
-    MultiMap headers0 = HeaderUtils.parseHeaders("""
+    /** 页面 URL 解析失败时的源站兜底，与 {@link #SHARE_URL_PREFIX} 同主机。 */
+    private static final String SHARE_ORIGIN = "https://w1.lanzn.com";
+    /**
+     * 目录 filemoreajax.php 换域顺序。个性域名上会立刻返回「已超时」。
+     * wwww 只放最后，避免单一主机超时直接失败。
+     * 文件 ajax 走 {@link #FILE_AJAX_FALLBACK_ORIGINS}，不要把 apifile 混进目录列表。
+     */
+    static final List<String> AJAX_FALLBACK_ORIGINS = List.of(
+            "https://w1.lanzn.com",
+            "https://www.lanzoux.com",
+            "https://wwww.lanzoux.com"
+    );
+    /**
+     * 文件页 iframe / 密码页里的 ajaxfile.php 经常是绝对地址
+     * {@code https://apifile.lanzouw.com/ajaxfile.php?file=…}。
+     * 相对路径打到页面源站或 w1/www 会空响应。apifile 放在文件 ajax 兜底的最前，
+     * 页面源站空响应后立刻换过去，不在四 w 上耗光超时。
+     */
+    static final String APIFILE_ORIGIN = "https://apifile.lanzouw.com";
+    static final List<String> FILE_AJAX_FALLBACK_ORIGINS = List.of(
+            APIFILE_ORIGIN,
+            "https://w1.lanzn.com",
+            "https://www.lanzoux.com",
+            "https://wwww.lanzoux.com"
+    );
+    /** 分享页 / ajax 请求超时 */
+    private static final long REQUEST_TIMEOUT = 8000;
+    /** 下载域跳转与二次验证超时，链路更长 */
+    private static final long DOWNLOAD_TIMEOUT = 10000;
+    private static final Pattern IFRAME_FN = Pattern.compile(
+            "src\\s*=\\s*[\"'](/fn\\?[^\"'\\s>]+)[\"']", Pattern.CASE_INSENSITIVE);
+    private static final Pattern P_WP_SIGN = Pattern.compile("wp_sign\\s*=\\s*'([^']+)'");
+    private static final Pattern P_AJAXDATA = Pattern.compile("ajaxdata\\s*=\\s*'([^']+)'");
+    private static final Pattern P_WEBSIGN = Pattern.compile("'websign'\\s*:\\s*'([^']*)'");
+    private static final Pattern P_WEBPAGE = Pattern.compile("[?&]webpage=([^&\"'\\s#]+)");
+    /** 页面脚本里的绝对 ajax，例如 https://apifile.lanzouw.com/ajaxfile.php?file=123 */
+    private static final Pattern P_AJAX_ABSOLUTE = Pattern.compile(
+            "['\"]((?:https?:)?//[^'\"\\s<>]+/ajax(?:m|file)\\.php\\?file=\\d+)['\"]",
+            Pattern.CASE_INSENSITIVE);
+    private static final Pattern P_AJAX_PATH = Pattern.compile("(?:['\"/]|^)(ajax(?:m|file)\\.php\\?file=\\d+)");
+    private static final Pattern P_SIGN = Pattern.compile("'sign'\\s*:\\s*'([^']+)'");
+    private static final Pattern P_ISNGIS = Pattern.compile("var\\s+isngis\\s*=\\s*'([^']+)'");
+    private static final Pattern P_VERIFY_FILE = Pattern.compile("'file'\\s*:\\s*'([^']+)'");
+    /** 蓝奏「取消分享 / 地址错误」提示页 */
+    private static final Pattern P_OFF_MSG = Pattern.compile("class=\"off1\"></div>\\s*</div>\\s*([^<]{2,80})<");
+    /** ESA 反爬挑战页特征 */
+    private static final String ARG1_MARK = "var arg1='";
+    private static final Pattern P_FILEMORE = Pattern.compile(
+            "url\\s*:\\s*'(/filemoreajax\\.php\\?file=\\d+)'[\\s\\S]*?data\\s*:\\s*\\{([^}]+)\\}");
+    private static final Pattern P_DATA_KV = Pattern.compile("'(\\w+)'\\s*:\\s*('(?:\\\\'|[^'])*'|\\d+|\\w+)");
+    /** CDN 直链里的 yyyy/mm/dd 分享日期 */
+    private static final Pattern P_URL_DATE = Pattern.compile("\\d{4}/\\d{1,2}/\\d{1,2}");
+    private static final Pattern P_INLINE_SCRIPT =
+            Pattern.compile("(?is)<script(?![^>]*\\bsrc\\s*=)[^>]*>(.*?)</script>");
+    private static final Pattern P_FI_NAME =
+            Pattern.compile("padding: 56px 0px 20px 0px;\">(.*?)<|filenajax\">(.*?)<"
+                    + "|class=\"b\"><span>(.*?)</span>");
+    private static final Pattern P_FI_SIZE =
+            Pattern.compile(">文件大小：</span>(.*?)<br>|\"n_filesize\">大小：(.*?)</div>"
+                    + "|文件大小：</div><div class=\"fileinforight\">(.*?)</div>");
+    private static final Pattern P_FI_AUTHOR =
+            Pattern.compile(">分享用户：</span><font>(.*?)</font>|获取<span>(.*?)</span>的文件|\"user-name\">(.*?)</"
+                    + "|分享用户：</div>[\\s\\S]{0,400}?<font[^>]*>(.*?)</font>");
+    private static final Pattern P_FI_DESC =
+            Pattern.compile("(?s)文件描述：</span><br>(.*?)</td>|class=\"n_box_des\">(.*?)</div>");
+    private static final Pattern P_FI_ID = Pattern.compile("\\?f=(.*?)&|fid = (.*?);");
+    private static final Pattern P_FI_TIME = Pattern.compile(">上传时间：</span>(.*?)<");
+    /** 分享页导航头，只读共享；需要改写时先 addAll 到新 MultiMap。 */
+    private static final MultiMap PAGE_HEADERS = HeaderUtils.parseHeaders("""
         Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7
-        Accept-Encoding: gzip, deflate
+        Accept-Encoding: identity
         Accept-Language: zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6
         Cache-Control: max-age=0
         DNT: 1
         Priority: u=0, i
-        Sec-CH-UA: "Chromium";v="140", "Not=A?Brand";v="24", "Microsoft Edge";v="140"
+        Sec-CH-UA: "Chromium";v="134", "Not:A-Brand";v="24", "Google Chrome";v="134"
         Sec-CH-UA-Mobile: ?0
-        Sec-CH-UA-Platform: "macOS"
+        Sec-CH-UA-Platform: "Windows"
         Sec-Fetch-Dest: document
         Sec-Fetch-Mode: navigate
         Sec-Fetch-Site: cross-site
         Sec-Fetch-User: ?1
         Upgrade-Insecure-Requests: 1
-        User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0
+        User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36
         """);
 
+    private static final String DOWN_AJAX_HEADERS = """
+            Accept: application/json, text/javascript, */*; q=0.01
+            Accept-Encoding: identity
+            Accept-Language: zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6
+            Cache-Control: no-cache
+            Content-Type: application/x-www-form-urlencoded
+            Pragma: no-cache
+            Sec-Fetch-Dest: empty
+            Sec-Fetch-Mode: cors
+            Sec-Fetch-Site: same-origin
+            User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36
+            X-Requested-With: XMLHttpRequest
+            sec-ch-ua: "Chromium";v="134", "Not:A-Brand";v="24", "Google Chrome";v="134"
+            sec-ch-ua-mobile: ?0
+            sec-ch-ua-platform: "Windows"
+            """;
+
+    private static final String VERIFY_AJAX_HEADERS = """
+            Accept: application/json, text/javascript, */*; q=0.01
+            Accept-Encoding: identity
+            Accept-Language: zh-CN,zh;q=0.9
+            Content-Type: application/x-www-form-urlencoded
+            Sec-Fetch-Dest: empty
+            Sec-Fetch-Mode: cors
+            Sec-Fetch-Site: same-origin
+            X-Requested-With: XMLHttpRequest
+            """;
+
+    public LzTool() {
+        super();
+        this.webClientSession = WebClientSession.create(createLzClient(null));
+    }
 
     public LzTool(ShareLinkInfo shareLinkInfo) {
         super(shareLinkInfo);
+        this.webClientSession = WebClientSession.create(createLzClient(shareLinkInfo));
+    }
+
+    /**
+     * ESA 对 gzip 响应常见不带可识别的 Content-Encoding，需客户端自动解压；
+     * 开源版没有 createBaseClientOptions，这里按 PanBase 同样规则带上 proxy，避免绕过全局代理。
+     */
+    private static WebClient createLzClient(ShareLinkInfo shareLinkInfo) {
+        WebClientOptions opts = new WebClientOptions()
+                .setConnectTimeout(10000)
+                .setFollowRedirects(false)
+                .setDecompressionSupported(true)
+                .setUserAgentEnabled(false)
+                .setIdleTimeout(12);
+        if (shareLinkInfo != null && shareLinkInfo.getOtherParam().containsKey("proxy")) {
+            JsonObject proxy = (JsonObject) shareLinkInfo.getOtherParam().get("proxy");
+            if (proxy != null && proxy.getString("host") != null && proxy.getInteger("port") != null) {
+                ProxyOptions proxyOptions = new ProxyOptions()
+                        .setType(ProxyType.valueOf(proxy.getString("type", "http").toUpperCase()))
+                        .setHost(proxy.getString("host"))
+                        .setPort(proxy.getInteger("port"));
+                String username = proxy.getString("username");
+                if (username != null && !username.isEmpty()) {
+                    proxyOptions.setUsername(username);
+                }
+                String password = proxy.getString("password");
+                if (password != null && !password.isEmpty()) {
+                    proxyOptions.setPassword(password);
+                }
+                opts.setProxyOptions(proxyOptions);
+            }
+        }
+        if (opts.getConnectTimeout() <= 0) {
+            opts.setConnectTimeout(10000);
+        }
+        return WebClient.create(WebClientVertxInit.get(), opts);
+    }
+
+    /**
+     * Vert.x decompressionSupported 可能已经解压，但响应头仍带 gzip；
+     * 再走 PanBase.asText 会二次解压得到乱码，iframe / down_p 都匹配不到。
+     */
+    @Override
+    protected String asText(HttpResponse<?> res) {
+        try {
+            Object raw = res.body();
+            if (raw instanceof Buffer body && body.length() > 0) {
+                int i = 0;
+                int len = body.length();
+                while (i < len) {
+                    byte c = body.getByte(i);
+                    if (c != ' ' && c != '\n' && c != '\r' && c != '\t') {
+                        if (c == '<' || c == '{' || c == '[') {
+                            return body.toString();
+                        }
+                        if ((c & 0xff) == 0x1f && i + 1 < len && (body.getByte(i + 1) & 0xff) == 0x8b) {
+                            return gunzipUtf8(body);
+                        }
+                        break;
+                    }
+                    i++;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return super.asText(res);
+    }
+
+    private static String gunzipUtf8(Buffer body) {
+        try (GZIPInputStream in = new GZIPInputStream(new ByteArrayInputStream(body.getBytes()))) {
+            return new String(in.readAllBytes(), StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            return body.toString();
+        }
+    }
+
+    @Override
+    protected JsonObject asJson(HttpResponse<?> res) {
+        JsonObject parsed = parseLzJson(asText(res));
+        if (parsed != null) {
+            return parsed;
+        }
+        return super.asJson(res);
+    }
+
+    /** ajax 常被标成 gzip/text/json，body 可能已解压或为空，不能直接 bodyAsJsonObject。 */
+    private static JsonObject parseLzJson(String text) {
+        if (text == null) {
+            return null;
+        }
+        String t = text.trim();
+        int start = t.indexOf('{');
+        if (start < 0) {
+            return null;
+        }
+        try {
+            return new JsonObject(t.substring(start));
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static String jsonString(JsonObject json, String key) {
+        Object v = json.getValue(key);
+        if (v == null) {
+            return null;
+        }
+        String s = String.valueOf(v).trim();
+        if (s.isEmpty() || "0".equals(s) || "null".equalsIgnoreCase(s)) {
+            return null;
+        }
+        return s;
+    }
+
+    /** 目录文件下载接口会先用 shareKey="-" 占位，不能当成真实分享路径。 */
+    private static boolean isPlaceholderShare(String u) {
+        if (u == null || u.isBlank()) {
+            return true;
+        }
+        String path = lzSharePath(u);
+        return path.isEmpty() || "-".equals(path);
+    }
+
+    /**
+     * 分享页 / 目录页 GET 保留原始主机和路径。
+     * 只有分享路径缺失（空链接、shareKey 占位）时才落到 {@link #SHARE_URL_PREFIX}。
+     */
+    static String resolveSharePageUrl(String shareUrl, String standardUrl, String shareKey) {
+        String u = shareUrl;
+        if (isPlaceholderShare(u)) {
+            u = standardUrl;
+        }
+        if (isPlaceholderShare(u)) {
+            return canonicalShareUrl(shareKey, null);
+        }
+        int q = u.indexOf('?');
+        String query = null;
+        if (q > 0) {
+            query = u.substring(q + 1);
+            u = u.substring(0, q);
+        }
+        int schemeEnd = u.indexOf("://");
+        if (schemeEnd < 0) {
+            return appendWebpage(u, query);
+        }
+        int pathStart = u.indexOf('/', schemeEnd + 3);
+        if (pathStart < 0) {
+            String base = u.endsWith("/") ? u : u + "/";
+            if (shareKey == null || shareKey.isBlank() || "-".equals(shareKey)) {
+                return appendWebpage(base, query);
+            }
+            return appendWebpage(base + shareKey, query);
+        }
+        return appendWebpage(u, query);
+    }
+
+    private String resolveShareUrl() {
+        return resolveSharePageUrl(
+                shareLinkInfo.getShareUrl(),
+                shareLinkInfo.getStandardUrl(),
+                shareLinkInfo.getShareKey());
+    }
+
+    /** 无原始主机时用标准下载域拼分享路径，不再写死 wwww.lanzoux.com。 */
+    private static String canonicalShareUrl(String shareKey, String query) {
+        if (shareKey == null || shareKey.isBlank() || "-".equals(shareKey)) {
+            return appendWebpage(SHARE_URL_PREFIX, query);
+        }
+        return appendWebpage(SHARE_URL_PREFIX + shareKey, query);
+    }
+
+    /**
+     * 目录内文件页主机：沿用已有分享主机，否则用 {@link #SHARE_URL_PREFIX}。
+     */
+    static String sharePageHostBase(String shareUrl, String standardUrl) {
+        String u = !isPlaceholderShare(shareUrl) ? shareUrl : standardUrl;
+        if (!isPlaceholderShare(u)) {
+            String origin = normalizeOrigin(originOf(u, SHARE_ORIGIN));
+            return origin + "/";
+        }
+        return SHARE_URL_PREFIX;
+    }
+
+    /**
+     * 目录 filemore 的 POST 主机顺序：分享页源站优先（普通节点通常可用），
+     * 然后是稳定下载域。wwww.lanzoux.com 固定排在最后。
+     */
+    static List<String> ajaxOrigins(String pageUrl) {
+        List<String> origins = new ArrayList<>();
+        addAjaxOrigin(origins, normalizeOrigin(originOf(pageUrl, "")));
+        for (String candidate : AJAX_FALLBACK_ORIGINS) {
+            addAjaxOrigin(origins, candidate);
+        }
+        return origins;
+    }
+
+    /**
+     * 文件 ajax 主机顺序。页面里若写出绝对 ajax URL，该主机最先尝试；
+     * 否则先打页面源站。空响应后再试 {@link #APIFILE_ORIGIN}，四 w 仍在最后。
+     *
+     * @param ajaxTarget {@link #fileAjaxTarget} 的返回值，绝对 URL 或相对路径；可为 null
+     */
+    static List<String> fileAjaxOrigins(String pageUrl, String ajaxTarget) {
+        List<String> origins = new ArrayList<>();
+        addAjaxOrigin(origins, originFromAjaxTarget(ajaxTarget));
+        addAjaxOrigin(origins, normalizeOrigin(originOf(pageUrl, "")));
+        for (String candidate : FILE_AJAX_FALLBACK_ORIGINS) {
+            addAjaxOrigin(origins, candidate);
+        }
+        return origins;
+    }
+
+    /**
+     * 从分享页或 iframe HTML 取出文件 ajax 地址。
+     * 绝对 URL（含协议相对 {@code //host/...}）原样返回；否则返回以 {@code /} 开头的相对路径。
+     */
+    static String fileAjaxTarget(String html) {
+        if (html == null || html.isEmpty()) {
+            return null;
+        }
+        Matcher abs = P_AJAX_ABSOLUTE.matcher(html);
+        if (abs.find()) {
+            String url = abs.group(1);
+            if (url.startsWith("//")) {
+                url = "https:" + url;
+            }
+            return url;
+        }
+        Matcher ajax = P_AJAX_PATH.matcher(html);
+        if (!ajax.find()) {
+            return null;
+        }
+        return "/" + ajax.group(1);
+    }
+
+    private static void addAjaxOrigin(List<String> origins, String origin) {
+        if (origin != null && origin.contains("://") && !origins.contains(origin)) {
+            origins.add(origin);
+        }
+    }
+
+    private static String originFromAjaxTarget(String ajaxTarget) {
+        if (ajaxTarget == null) {
+            return "";
+        }
+        if (ajaxTarget.startsWith("http://") || ajaxTarget.startsWith("https://")) {
+            return normalizeOrigin(originOf(ajaxTarget, ""));
+        }
+        return "";
+    }
+
+    private static String normalizeOrigin(String origin) {
+        if (origin == null) {
+            return "";
+        }
+        String o = origin.trim();
+        while (o.endsWith("/")) {
+            o = o.substring(0, o.length() - 1);
+        }
+        return o;
+    }
+
+    /**
+     * 个性域名常见 {@code inf=已超时}，或响应根本不是 JSON。这类结果说明当前主机不可用，应换下一个域名。
+     * 密码错误、分享失效等业务错误不换域名。
+     */
+    static boolean ajaxResponseShouldFallback(String text) {
+        if (text == null || text.isBlank()) {
+            return true;
+        }
+        JsonObject json = parseLzJson(text);
+        if (json == null) {
+            return true;
+        }
+        Integer zt = jsonInt(json, "zt");
+        if (zt != null && zt == 1) {
+            return false;
+        }
+        String info = ajaxInfoText(json);
+        return info != null && info.contains("超时");
+    }
+
+    private static Integer jsonInt(JsonObject json, String key) {
+        Object v = json.getValue(key);
+        if (v instanceof Number n) {
+            return n.intValue();
+        }
+        if (v instanceof CharSequence) {
+            try {
+                return Integer.parseInt(v.toString().trim());
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+        }
+        return null;
+    }
+
+    private static String ajaxInfoText(JsonObject json) {
+        for (String key : new String[]{"inf", "info"}) {
+            Object v = json.getValue(key);
+            if (v instanceof CharSequence) {
+                String s = v.toString().trim();
+                if (!s.isEmpty() && !"null".equalsIgnoreCase(s)) {
+                    return s;
+                }
+            }
+        }
+        return null;
+    }
+
+    /** 目录文件 ID 可能带 webpage=，必须保留；pwd 走独立字段，不拼进 URL。 */
+    private static String appendWebpage(String url, String query) {
+        if (query == null || query.isBlank()) {
+            return url;
+        }
+        for (String part : query.split("&")) {
+            if (part.startsWith("webpage=")) {
+                return url + "?" + part;
+            }
+        }
+        return url;
     }
 
     public Future<String> parse() {
-        String sUrl = shareLinkInfo.getStandardUrl();
-        String pwd = shareLinkInfo.getSharePassword();
+        String sUrl = resolveShareUrl();
+        String rawPwd = shareLinkInfo.getSharePassword();
+        final String pwd = "-".equals(rawPwd) ? null : rawPwd;
 
-        WebClient client = clientNoRedirects;
-        client.getAbs(sUrl)
-                .putHeaders(headers0)
-                .send().onSuccess(res -> {
-                    try {
-                        String html = asText(res);
-                        if (hasAcwArg1(html)) {
-                            webClientSession = WebClientSession.create(clientNoRedirects);
-                            if (!setCookie(html, sUrl)) {
-                                fail("蓝奏云反爬 arg1 Cookie 解析失败，页面内容异常");
-                                return;
-                            }
-                            webClientSession.getAbs(sUrl)
-                                    .putHeaders(headers0)
-                                    .send().onSuccess(res2 -> {
-                                        try {
-                                            String html2 = asText(res2);
-                                            doParser(html2, pwd, sUrl);
-                                        } catch (Exception e) {
-                                            fail("蓝奏云页面响应处理异常: {}", e.getMessage());
-                                        }
-                                    }).onFailure(handleFail(sUrl));
-
-                        } else {
-                            doParser(html, pwd, sUrl);
-                        }
-                    } catch (Exception e) {
-                        fail("蓝奏云页面响应处理异常: {}", e.getMessage());
-                    }
-
-                }).onFailure(handleFail(sUrl));
+        getWithArg1Retry(sUrl, PAGE_HEADERS)
+                .onSuccess(html -> doParser(html, pwd, sUrl))
+                .onFailure(handleFail(sUrl));
         return promise.future();
     }
 
     private void doParser(String html, String pwd, String sUrl) {
-        if (html == null || html.isBlank()) {
-            fail("蓝奏云页面响应为空");
-            return;
-        }
-        if (isShareCancelledPage(html)) {
-            fail("分享已失效或文件已取消分享");
-            return;
-        }
-        // 检测是否为目录分享链接 (含 /s/、/b/ 路径段或 b 开头的路径段)
-        if (sUrl.matches(".*/(s|b)/[^/]+.*") || sUrl.matches(".*/b[^/]+.*")) {
+        if (isLzFolderShare(sUrl, html)) {
             fail("该链接为蓝奏云目录分享，请使用目录解析接口");
             return;
         }
-        // 若仍是校验页 (parse()中cookie域名与实际URL不匹配时会出现), 重试一次
-        if (hasAcwArg1(html)) {
-            webClientSession = WebClientSession.create(clientNoRedirects);
-            if (!setCookie(html, sUrl)) {
-                fail("蓝奏云反爬 arg1 Cookie 解析失败，页面内容异常");
-                return;
-            }
-            webClientSession.getAbs(sUrl).putHeaders(headers0).send().onSuccess(res -> {
-                try {
-                    String html2 = asText(res);
-                    if (isShareCancelledPage(html2)) {
-                        fail("分享已失效或文件已取消分享");
-                        return;
-                    }
-                    if (hasAcwArg1(html2)) {
-                        fail("蓝奏云反爬校验失败，请稍后重试");
-                        return;
-                    }
-                    doParserInternal(html2, pwd, sUrl);
-                } catch (Exception e) {
-                    fail("蓝奏云页面响应处理异常: {}", e.getMessage());
-                }
-            }).onFailure(handleFail(sUrl));
-            return;
-        }
-        doParserInternal(html, pwd, sUrl);
-    }
-
-    private void doParserInternal(String html, String pwd, String sUrl) {
-        if (html == null || html.isBlank()) {
-            fail("蓝奏云页面响应为空");
-            return;
-        }
-        if (isShareCancelledPage(html)) {
-            fail("分享已失效或文件已取消分享");
-            return;
-        }
-        try {
-            setFileInfo(html, shareLinkInfo);
-        } catch (Exception e) {
-            log.error("文件信息解析异常", e);
-        }
-        // 匹配iframe
-        Matcher matcher = IFRAME_SRC_PATTERN.matcher(html);
-        // 没有Iframe说明是加密分享, 匹配sign通过密码请求下载页面
+        setFileInfo(html, shareLinkInfo);
+        Matcher matcher = IFRAME_FN.matcher(html);
         if (!matcher.find()) {
-            try {
-                String jsText = getJsByPwd(pwd, html, "document.getElementById('rpt')");
-                ScriptObjectMirror scriptObjectMirror = JsExecUtils.executeDynamicJs(jsText, "down_p");
-                getDownURL(sUrl, scriptObjectMirror);
-            } catch (Exception e) {
-                fail(e, "js引擎执行失败");
-            }
-        } else {
-            // 没有密码
-            String iframePath = matcher.group(1);
-            String absoluteURI = SHARE_URL_PREFIX + iframePath;
-            // 创建局部副本，避免修改实例字段导致累积
-            MultiMap headersCopy = MultiMap.caseInsensitiveMultiMap().addAll(headers0);
-            headersCopy.add("Referer", absoluteURI);
-            webClientSession.getAbs(absoluteURI).putHeaders(headersCopy).send().onSuccess(res2 -> {
-                try {
-                    String html2 = asText(res2);
-                    if (isShareCancelledPage(html2)) {
-                        fail("分享已失效或文件已取消分享");
-                        return;
-                    }
-                    String jsText = getJsText(html2);
-                    if (jsText == null) {
-                        if (!setCookie(html2, absoluteURI)) {
-                            fail("蓝奏云反爬 arg1 Cookie 解析失败，页面内容异常");
-                            return;
-                        }
-                        webClientSession.getAbs(absoluteURI).send().onSuccess(res3 -> {
-                            try {
-                                String html3 = asText(res3);
-                                if (isShareCancelledPage(html3)) {
-                                    fail("分享已失效或文件已取消分享");
-                                    return;
-                                }
-                                String jsText3 = getJsText(html3);
-                                if (jsText3 != null) {
-                                    try {
-                                        ScriptObjectMirror scriptObjectMirror = JsExecUtils.executeDynamicJs(jsText3, null);
-                                        getDownURL(sUrl, scriptObjectMirror);
-                                    } catch (ScriptException | NoSuchMethodException e) {
-                                        fail(e, "引擎执行失败");
-                                    }
-                                } else {
-                                    fail(SHARE_URL_PREFIX + iframePath + " -> " + sUrl + ": 获取失败0, 可能分享已失效");
-                                }
-                            } catch (Exception e) {
-                                fail("蓝奏云 iframe 响应处理异常: {}", e.getMessage());
-                            }
-                        }).onFailure(handleFail(absoluteURI));
-                    } else {
-                        try {
-                            ScriptObjectMirror scriptObjectMirror = JsExecUtils.executeDynamicJs(jsText, null);
-                            getDownURL(sUrl, scriptObjectMirror);
-                        } catch (ScriptException | NoSuchMethodException e) {
-                            fail(e, "js引擎执行失败");
-                        }
-                    }
-                } catch (Exception e) {
-                    fail("蓝奏云 iframe 响应处理异常: {}", e.getMessage());
+            if (html.contains("down_p") || html.contains("id=\"pwd\"") || html.contains("id='pwd'")) {
+                if (pwd == null || pwd.isBlank()) {
+                    fail("需要访问密码");
+                    return;
                 }
-            }).onFailure(handleFail(SHARE_URL_PREFIX));
+                if (!postAjaxFromHtml(sUrl, html, pwd)) {
+                    fail("密码页未找到下载参数，可能密码错误或分享已失效");
+                }
+            } else {
+                Matcher offMatcher = P_OFF_MSG.matcher(html);
+                if (offMatcher.find()) {
+                    fail(offMatcher.group(1).trim());
+                } else {
+                    fail("未找到下载入口，可能被风控拦截或分享已失效");
+                }
+            }
+            return;
         }
+        String iframePath = matcher.group(1);
+        String absoluteURI = joinUrl(originOf(sUrl, SHARE_ORIGIN) + "/", iframePath);
+        getWithArg1Retry(absoluteURI, PAGE_HEADERS)
+                .onSuccess(iframeHtml -> {
+                    if (!postAjaxFromHtml(absoluteURI, iframeHtml, null)) {
+                        fail(absoluteURI + " -> " + sUrl + ": 获取失败0, 可能分享已失效");
+                    }
+                })
+                .onFailure(handleFail(absoluteURI));
     }
 
-    private boolean setCookie(String html, String url) {
-        String arg1 = extractAcwArg1(html);
-        if (arg1 == null) {
+    private Future<String> getWithArg1Retry(String url, MultiMap headers) {
+        return sendWithArg1Retry(url,
+                () -> webClientSession.getAbs(url).timeout(REQUEST_TIMEOUT).putHeaders(headers).send());
+    }
+
+    private Future<String> postFormWithArg1Retry(String url, MultiMap headers, MultiMap form) {
+        return sendWithArg1Retry(url,
+                () -> webClientSession.postAbs(url).timeout(REQUEST_TIMEOUT).putHeaders(headers).sendForm(form));
+    }
+
+    /** ESA 挑战页只需算出 acw_sc__v2 后原样重放一次，各解析步骤共用。 */
+    private Future<String> sendWithArg1Retry(String url, Supplier<Future<HttpResponse<Buffer>>> sender) {
+        return sender.get().map(this::asText).compose(html -> {
+            if (html == null || !html.contains(ARG1_MARK)) {
+                return Future.succeededFuture(html);
+            }
+            if (!applyArg1Cookie(html, url)) {
+                return Future.failedFuture("蓝奏云反爬 arg1 Cookie 解析失败，页面内容异常");
+            }
+            return sender.get().map(this::asText).compose(retried ->
+                    retried != null && retried.contains(ARG1_MARK)
+                            ? Future.failedFuture("蓝奏云反爬校验失败，请稍后重试")
+                            : Future.succeededFuture(retried));
+        });
+    }
+
+    private boolean applyArg1Cookie(String html, String url) {
+        int beginIndex = html.indexOf("arg1='") + 6;
+        int endIndex = html.indexOf("';", beginIndex);
+        if (beginIndex < 6 || endIndex == -1 || endIndex <= beginIndex) {
             return false;
         }
-        String acw_sc__v2 = AcwScV2Generator.acwScV2Simple(arg1);
-        // 从 URL 中动态提取域名（如 lanzoum.com, lanzoux.com 等）
-        String domain = ".lanzn.com"; // 默认兜底
-        try {
-            java.net.URL urlObj = new java.net.URL(url);
-            String host = urlObj.getHost(); // e.g. "dzvip.lanzoum.com"
-            int firstDot = host.indexOf('.');
-            if (firstDot >= 0) {
-                domain = host.substring(firstDot); // e.g. ".lanzoum.com"
-            }
-        } catch (MalformedURLException ignored) {}
-        // 创建一个 Cookie 并放入 CookieStore
-        DefaultCookie nettyCookie = new DefaultCookie("acw_sc__v2", acw_sc__v2);
-        nettyCookie.setDomain(domain);
-        nettyCookie.setPath("/");
-        nettyCookie.setSecure(false);
-        nettyCookie.setHttpOnly(false);
-        webClientSession.cookieStore().put(nettyCookie);
+        String arg1 = html.substring(beginIndex, endIndex);
+        putSessionCookie("acw_sc__v2", AcwScV2Generator.acwScV2Simple(arg1), url, null);
         return true;
     }
 
@@ -272,279 +591,674 @@ public class LzTool extends PanBase {
         return jsText;
     }
 
-    private String getJsText(String html) {
-        if (html == null) {
+    private boolean postAjaxFromHtml(String referer, String html, String pwd) {
+        AjaxCall call = extractAjaxFromHtml(html, pwd);
+        if (call == null) {
+            return false;
+        }
+        getDownURL(referer, call);
+        return true;
+    }
+
+    /** 页面里提取出的 ajax 调用。absoluteUrl 非空时优先打该主机。 */
+    private record AjaxCall(String path, Map<String, String> form, String absoluteUrl) {
+        private AjaxCall(String path, Map<String, String> form) {
+            this(path, form, null);
+        }
+
+        MultiMap toForm() {
+            MultiMap m = MultiMap.caseInsensitiveMultiMap();
+            form.forEach(m::set);
+            return m;
+        }
+    }
+
+    private static AjaxCall extractAjaxFromHtml(String html, String pwd) {
+        if (html == null || html.isEmpty()) {
             return null;
         }
+        String target = fileAjaxTarget(html);
+        if (target == null) {
+            return null;
+        }
+        String absolute = target.startsWith("http://") || target.startsWith("https://") ? target : null;
+        String ajaxPath = absolute == null ? target : pathOfAbsolute(absolute);
+        Map<String, String> data = new LinkedHashMap<>();
+        data.put("action", "downprocess");
+        Matcher wp = P_WP_SIGN.matcher(html);
+        Matcher ad = P_AJAXDATA.matcher(html);
+        Matcher isngis = P_ISNGIS.matcher(html);
+        String lastIsngis = null;
+        while (isngis.find()) {
+            if (!isngis.group(1).isEmpty()) {
+                lastIsngis = isngis.group(1);
+            }
+        }
+        if (wp.find()) {
+            data.put("sign", wp.group(1));
+            if (ad.find()) {
+                data.put("websignkey", ad.group(1));
+                data.put("signs", ad.group(1));
+            }
+            data.put("websign", "");
+            Matcher ws = P_WEBSIGN.matcher(html);
+            if (ws.find()) {
+                data.put("websign", ws.group(1));
+            }
+            data.put("kd", "1");
+            data.put("ves", "1");
+            if (pwd != null && !pwd.isEmpty()) {
+                data.put("p", pwd);
+            }
+        } else if (lastIsngis != null) {
+            data.put("sign", lastIsngis);
+            data.put("kd", "1");
+            if (pwd != null && !pwd.isEmpty()) {
+                data.put("p", pwd);
+            }
+        } else {
+            List<String> signs = new ArrayList<>();
+            Matcher sm = P_SIGN.matcher(html);
+            while (sm.find()) {
+                signs.add(sm.group(1));
+            }
+            if (signs.isEmpty()) {
+                return null;
+            }
+            data.put("sign", signs.size() > 1 ? signs.get(1) : signs.get(0));
+            if (pwd != null && !pwd.isEmpty()) {
+                data.put("p", pwd);
+            }
+            data.put("kd", "1");
+            Matcher ad2 = P_AJAXDATA.matcher(html);
+            if (ad2.find()) {
+                data.put("websignkey", ad2.group(1));
+                data.put("signs", ad2.group(1));
+            }
+        }
+        return new AjaxCall(ajaxPath, data, absolute);
+    }
+
+    private static String pathOfAbsolute(String url) {
+        try {
+            URL u = new URL(url);
+            String path = u.getPath() == null ? "" : u.getPath();
+            if (u.getQuery() != null && !u.getQuery().isEmpty()) {
+                path = path + "?" + u.getQuery();
+            }
+            if (!path.startsWith("/")) {
+                path = "/" + path;
+            }
+            return path;
+        } catch (Exception e) {
+            return url;
+        }
+    }
+
+    private static AjaxCall extractFolderAjax(String html, String pwd) {
+        if (html == null || html.isEmpty()) {
+            return null;
+        }
+        Matcher block = P_FILEMORE.matcher(html);
+        if (!block.find()) {
+            return null;
+        }
+        Map<String, String> data = new LinkedHashMap<>();
+        Matcher kv = P_DATA_KV.matcher(block.group(2));
+        while (kv.find()) {
+            String key = kv.group(1);
+            String raw = kv.group(2);
+            if ("pwd".equals(key)) {
+                data.put(key, pwd == null ? "" : pwd);
+                continue;
+            }
+            if ("pg".equals(key) || "pgs".equals(key)) {
+                data.put("pg", "1");
+                continue;
+            }
+            data.put(key, resolveJsValue(html, raw));
+        }
+        if (!data.containsKey("fid") || !data.containsKey("t") || !data.containsKey("k")) {
+            return null;
+        }
+        if (pwd != null && !pwd.isEmpty()) {
+            data.put("pwd", pwd);
+        }
+        return new AjaxCall(block.group(1), data);
+    }
+
+    private static String resolveJsValue(String html, String raw) {
+        if (raw == null) {
+            return "";
+        }
+        if (raw.length() >= 2 && raw.charAt(0) == '\'' && raw.charAt(raw.length() - 1) == '\'') {
+            return raw.substring(1, raw.length() - 1);
+        }
+        if (raw.matches("\\d+")) {
+            return raw;
+        }
+        Matcher m = Pattern.compile("var\\s+" + Pattern.quote(raw) + "\\s*=\\s*'([^']*)'").matcher(html);
+        if (m.find()) {
+            return m.group(1);
+        }
+        if ("pgs".equals(raw)) {
+            return "1";
+        }
+        return raw;
+    }
+
+    private String getJsText(String html) {
+        if (html == null || html.isEmpty()) {
+            return null;
+        }
+        Matcher m = P_INLINE_SCRIPT.matcher(html);
+        String lastAjax = null;
+        while (m.find()) {
+            String body = m.group(1).replaceAll("<!--.*?-->", "").trim();
+            if (body.isEmpty()) {
+                continue;
+            }
+            if (body.contains("$.ajax") || body.contains("down_p") || body.contains("wp_sign")
+                    || body.contains("ajaxdata") || body.contains("filemoreajax")) {
+                lastAjax = body;
+            }
+        }
+        if (lastAjax != null) {
+            return lastAjax;
+        }
         String jsTagStart = "<script type=\"text/javascript\">";
-        String jsTagEnd = "</script>";
         int index = html.lastIndexOf(jsTagStart);
         if (index == -1) {
             return null;
         }
         int startPos = index + jsTagStart.length();
-        int endPos = html.indexOf(jsTagEnd, startPos);
-        if (endPos <= startPos) {
+        int endPos = html.indexOf("</script>", startPos);
+        if (endPos < 0) {
             return null;
         }
-        return html.substring(startPos, endPos).replaceAll("<!--.*-->", "");
-    }
-
-    static String extractAcwArg1(String html) {
-        if (html == null) {
-            return null;
+        String fallback = html.substring(startPos, endPos).replaceAll("<!--.*-->", "");
+        if (fallback.contains("$.ajax") || fallback.contains("wp_sign") || fallback.contains("down_p")
+                || fallback.contains("ajaxdata") || fallback.contains("filemoreajax")) {
+            return fallback;
         }
-        int beginIndex = html.indexOf("arg1='");
-        if (beginIndex < 0) {
-            return null;
-        }
-        beginIndex += 6;
-        int endIndex = html.indexOf("';", beginIndex);
-        if (endIndex <= beginIndex) {
-            return null;
-        }
-        return html.substring(beginIndex, endIndex);
+        return null;
     }
 
-    static boolean isShareCancelledPage(String html) {
-        return html != null
-                && ((html.contains("来晚啦") && html.contains("取消分享"))
-                || (html.contains("class=\"off\"") && html.contains("取消分享")));
+    private void getDownURL(String referer, AjaxCall call) {
+        MultiMap headers = HeaderUtils.parseHeaders(DOWN_AJAX_HEADERS);
+        // 文件 ajax 优先用页面里的绝对地址（常见 apifile.lanzouw.com）。
+        // 页面源站空响应再换 FILE_AJAX_FALLBACK_ORIGINS，wwww 仍在最后。
+        // iframe / 分享页的 Referer 保持原主机，不把页面 GET 改写到 wwww。
+        String page = referer != null && !referer.isBlank() ? referer : resolveShareUrl();
+        headers.set("referer", page);
+        String target = call.absoluteUrl() != null ? call.absoluteUrl() : call.path();
+        postAjaxAt(fileAjaxOrigins(page, target), 0, call, headers, this::handleAjaxDownResponse, null);
     }
 
-    private static boolean hasAcwArg1(String html) {
-        return html != null && html.contains("var arg1='");
+    /**
+     * 依次向 {@link #ajaxOrigins} 发 POST。连接失败或「已超时」换下一个主机；
+     * wwww.lanzoux.com 只在最后尝试。业务错误（密码、失效）立即返回。
+     */
+    private void postAjaxWithFallback(String pageUrl, AjaxCall call, MultiMap headers,
+                                       Handler<String> onBody, Handler<Throwable> onFailure) {
+        postAjaxAt(ajaxOrigins(pageUrl), 0, call, headers, onBody, onFailure);
     }
 
-    private void getDownURL(String key, Map<String, ?> obj) {
-        if (obj == null) {
-            fail("需要访问密码");
+    private void postAjaxAt(List<String> origins, int index, AjaxCall call, MultiMap headers,
+                             Handler<String> onBody, Handler<Throwable> onFailure) {
+        if (index >= origins.size()) {
+            String msg = "蓝奏 ajax 全部域名均失败";
+            if (onFailure != null) {
+                onFailure.handle(new RuntimeException(msg));
+            } else {
+                fail(msg);
+            }
             return;
         }
-        Map<?, ?> signMap = (Map<?, ?>)obj.get("data");
-        String url0 = String.valueOf(obj.get("url"));
-        MultiMap map = MultiMap.caseInsensitiveMultiMap();
-        signMap.forEach((k, v) -> {
-            map.add((String) k, v.toString());
-        });
-        MultiMap headers = HeaderUtils.parseHeaders("""
-                Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7
-                Accept-Encoding: gzip, deflate, br
-                Accept-Language: zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6
-                Cache-Control: no-cache
-                Connection: keep-alive
-                Content-Type: application/x-www-form-urlencoded
-                Pragma: no-cache
-                Sec-Fetch-Dest: empty
-                Sec-Fetch-Mode: cors
-                Sec-Fetch-Site: same-origin
-                User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36 Edg/134.0.0.0
-                X-Requested-With: XMLHttpRequest
-                sec-ch-ua: "Chromium";v="134", "Not:A-Brand";v="24", "Microsoft Edge";v="134"
-                sec-ch-ua-mobile: ?0
-                sec-ch-ua-platform: "Windows"
-                """);
-
-        headers.set("referer", key);
-        // action=downprocess&signs=%3Fctdf&websignkey=I5gl&sign=BWMGOF1sBTRWXwI9BjZdYVA7BDhfNAIyUG9UawJtUGMIPlAhACkCa1UyUTAAYFxvUj5XY1E7UGFXaFVq&websign=&kd=1&ves=1
-        String url = SHARE_URL_PREFIX + url0;
-        webClientSession.postAbs(url).putHeaders(headers).sendForm(map).onSuccess(res2 -> {
-            try {
-                JsonObject urlJson = asJson(res2);
-                String name = urlJson.getString("inf");
-                if (urlJson.getInteger("zt") != 1) {
-                    fail(name);
-                    return;
-                }
-                // 文件名
-                if (urlJson.containsKey("inf") && urlJson.getMap().get("inf") instanceof CharSequence) {
-                    ((FileInfo)shareLinkInfo.getOtherParam().get("fileInfo")).setFileName(name);
-                }
-
-                String downUrl = urlJson.getString("dom") + "/file/" + urlJson.getString("url");
-                headers.remove("Referer");
-                webClientSession.getAbs(downUrl).putHeaders(headers).send()
-                        .onSuccess(res3 -> {
-                            try {
-                                String location = res3.headers().get("Location");
-                                if (location == null) {
-                                    String text = asText(res3);
-                                    if (isShareCancelledPage(text)) {
-                                        fail(downUrl + " -> 分享已失效或文件已取消分享");
-                                        return;
-                                    }
-                                    // 使用cookie 再请求一次
-                                    headers.add("Referer", downUrl);
-                                    String arg1 = extractAcwArg1(text);
-                                    if (arg1 == null) {
-                                        fail(downUrl + " -> 蓝奏云反爬 arg1 Cookie 解析失败，可能分享已失效");
-                                        return;
-                                    }
-                                    String acw_sc__v2 = AcwScV2Generator.acwScV2Simple(arg1);
-                                    // 从 downUrl 中动态提取域名
-                                    String downDomain = ".lanrar.com";
-                                    try {
-                                        java.net.URL du = new java.net.URL(downUrl);
-                                        String h = du.getHost();
-                                        int dot = h.indexOf('.');
-                                        if (dot >= 0) downDomain = h.substring(dot);
-                                    } catch (MalformedURLException ignored) {}
-                                    // 创建一个 Cookie 并放入 CookieStore
-                                    DefaultCookie nettyCookie = new DefaultCookie("acw_sc__v2", acw_sc__v2);
-                                    nettyCookie.setDomain(downDomain);
-                                    nettyCookie.setPath("/");
-                                    nettyCookie.setSecure(false);
-                                    nettyCookie.setHttpOnly(false);
-                                    WebClientSession webClientSession2 = WebClientSession.create(clientNoRedirects);
-                                    webClientSession2.cookieStore().put(nettyCookie);
-                                    webClientSession2.getAbs(downUrl).putHeaders(headers).send()
-                                            .onSuccess(res4 -> {
-                                                try {
-                                                    String location0 = res4.headers().get("Location");
-                                                    if (location0 == null) {
-                                                        fail(downUrl + " -> 直链获取失败2, 可能分享已失效");
-                                                    } else {
-                                                        setDateAndComplete(location0);
-                                                    }
-                                                } catch (Exception e) {
-                                                    fail("蓝奏云直链二次响应处理异常: {}", e.getMessage());
-                                                }
-                                            }).onFailure(handleFail(downUrl));
-                                    return;
-                                }
-                                setDateAndComplete(location);
-                            } catch (Exception e) {
-                                fail("蓝奏云直链响应处理异常: {}", e.getMessage());
-                            }
-                        })
-                        .onFailure(handleFail(downUrl));
-            } catch (Exception e) {
-                fail("解析异常");
-            }
-        }).onFailure(handleFail(url));
+        String url = joinUrl(origins.get(index) + "/", call.path());
+        boolean hasNext = index + 1 < origins.size();
+        postFormWithArg1Retry(url, headers, call.toForm())
+                .onSuccess(text -> {
+                    if (hasNext && ajaxResponseShouldFallback(text)) {
+                        log.warn("蓝奏 ajax {} 不可用，改试下一域名", url);
+                        postAjaxAt(origins, index + 1, call, headers, onBody, onFailure);
+                        return;
+                    }
+                    onBody.handle(text);
+                })
+                .onFailure(err -> {
+                    if (hasNext) {
+                        log.warn("蓝奏 ajax {} 请求失败: {}，改试下一域名", url, err.getMessage());
+                        postAjaxAt(origins, index + 1, call, headers, onBody, onFailure);
+                        return;
+                    }
+                    if (onFailure != null) {
+                        onFailure.handle(err);
+                    } else {
+                        handleFail(url).handle(err);
+                    }
+                });
     }
 
-    private void setDateAndComplete(String location0) {
-        // 分享时间 提取url中的时间戳格式：lanzoui.com/abc/abc/yyyy/mm/dd/
-        Matcher matcher = URL_DATE_PATTERN.matcher(location0);
-        if (matcher.find()) {
-            String dateStr = parseLanzouFileTime(matcher.group());
-            ((FileInfo)shareLinkInfo.getOtherParam().get("fileInfo")).setCreateTime(dateStr);
+    private void handleAjaxDownResponse(String text) {
+        JsonObject urlJson = parseLzJson(text);
+        if (urlJson == null) {
+            String preview = text == null ? "空响应" : text.substring(0, Math.min(200, text.length()));
+            fail("ajax 返回非JSON: " + preview);
+            return;
         }
-        promise.complete(location0);
+        Object infVal = urlJson.getValue("inf");
+        String name = infVal instanceof CharSequence ? infVal.toString() : null;
+        Integer zt = urlJson.getInteger("zt");
+        if (zt == null || zt != 1) {
+            fail(name != null ? name : String.valueOf(infVal));
+            return;
+        }
+        if (name != null) {
+            Object fi = shareLinkInfo.getOtherParam().get("fileInfo");
+            if (fi instanceof FileInfo fileInfo) {
+                fileInfo.setFileName(name);
+            }
+        }
+        String dom = jsonString(urlJson, "dom");
+        String token = jsonString(urlJson, "url");
+        if (dom == null || token == null) {
+            fail("ajax 未返回下载地址");
+            return;
+        }
+        String downUrl = dom + "/file/" + token;
+        followFileUrl(downUrl, false);
     }
 
-    private static MultiMap getHeaders(String key) {
+    /**
+     * 中间链：部分出口仍 302；多数（含机房 IP）固定出「验证并下载」页。
+     * dmpdmp 等下载域仍会出 arg1 挑战（Windows UA 更常见），必须算 acw_sc__v2 再请求。
+     * 必须等约 2s 后 POST /file/ajax.php el=2 拿 CDN 直链；立刻 POST 会 ?SignError。
+     * 中间页不能当成功结果返回——用户侧裸打开永远是验证 HTML。
+     */
+    private void followFileUrl(String downUrl, boolean arg1Retried) {
+        String host = hostOf(downUrl);
+        String parent = registrableDomain(host);
+        putSessionCookie("down_ip", "1", downUrl, parent != null ? parent : "lanrar.com");
+        if (parent != null) {
+            DefaultCookie parentCookie = new DefaultCookie("down_ip", "1");
+            parentCookie.setDomain(parent);
+            parentCookie.setPath("/");
+            webClientSession.cookieStore().put(parentCookie);
+        }
+
+        String origin = originOf(downUrl, "https://developer2.lanrar.com");
+        MultiMap h = lanrarPageHeaders(origin);
+        webClientSession.getAbs(downUrl).timeout(DOWNLOAD_TIMEOUT).putHeaders(h).send()
+                .onSuccess(res -> {
+                    String location = firstHttpLocation(res);
+                    if (isIosInstallRedirect(location)) {
+                        log.warn("下载域按 iOS 在线安装跳转，忽略 plist: {}", location);
+                    } else if (isDirectLink(location)) {
+                        completeDownloadLink(location);
+                        return;
+                    }
+                    String html = asText(res);
+                    if (html != null && html.contains(ARG1_MARK)) {
+                        if (!arg1Retried && applyArg1Cookie(html, downUrl)) {
+                            followFileUrl(downUrl, true);
+                            return;
+                        }
+                        fail("蓝奏下载域反爬校验失败，请稍后重试");
+                        return;
+                    }
+                    if (html != null && html.contains("down_r") && html.contains("ajax.php")) {
+                        postVerifyAjax(downUrl, origin, html, 0);
+                        return;
+                    }
+                    log.warn("下载域未出验证页也未跳转 status={} host={}", res.statusCode(), host);
+                    fail("蓝奏下载域未返回直链，请稍后重试");
+                })
+                .onFailure(t -> {
+                    log.warn("下载域请求失败: {}", t.getMessage());
+                    fail("蓝奏下载域请求失败: " + t.getMessage());
+                });
+    }
+
+    private void postVerifyAjax(String downUrl, String origin, String html, int attempt) {
+        Matcher file = P_VERIFY_FILE.matcher(html);
+        Matcher sign = P_SIGN.matcher(html);
+        if (!file.find() || !sign.find()) {
+            fail("蓝奏验证页缺少 file/sign");
+            return;
+        }
+        MultiMap form = MultiMap.caseInsensitiveMultiMap();
+        form.add("file", file.group(1));
+        form.add("el", "2");
+        form.add("sign", sign.group(1));
+        String ajaxUrl = origin + "/file/ajax.php";
+        MultiMap h = lanrarAjaxHeaders(downUrl);
+        h.set("Origin", origin);
+        // 验证页 loading ~2s；过早 POST → zt=1 但 url=?SignError
+        long delay = attempt == 0 ? 2200 : 2000;
+        WebClientVertxInit.get().setTimer(delay, id ->
+                webClientSession.postAbs(ajaxUrl).timeout(DOWNLOAD_TIMEOUT).putHeaders(h).sendForm(form)
+                        .onSuccess(res -> {
+                            JsonObject json = parseLzJson(asText(res));
+                            String url = json == null ? null : jsonString(json, "url");
+                            if (isDirectLink(url)) {
+                                completeDownloadLink(url);
+                                return;
+                            }
+                            log.warn("验证 ajax 未返回直链 attempt={} url={}", attempt, url);
+                            if (attempt < 1) {
+                                retryVerifyWithFreshPage(downUrl, origin, attempt);
+                                return;
+                            }
+                            fail("蓝奏二次验证未返回直链");
+                        })
+                        .onFailure(t -> {
+                            log.warn("验证 ajax 失败 attempt={}: {}", attempt, t.getMessage());
+                            if (attempt < 1) {
+                                retryVerifyWithFreshPage(downUrl, origin, attempt);
+                                return;
+                            }
+                            fail("蓝奏二次验证请求失败: " + t.getMessage());
+                        }));
+    }
+
+    /** SignError / 请求失败都要重新拉验证页换新 file/sign，复用旧 sign 必然再失败。 */
+    private void retryVerifyWithFreshPage(String downUrl, String origin, int attempt) {
+        webClientSession.getAbs(downUrl).timeout(DOWNLOAD_TIMEOUT).putHeaders(lanrarPageHeaders(origin)).send()
+                .onSuccess(res -> {
+                    String html = asText(res);
+                    if (html != null && html.contains("down_r")) {
+                        postVerifyAjax(downUrl, origin, html, attempt + 1);
+                    } else {
+                        fail("蓝奏二次验证失败");
+                    }
+                })
+                .onFailure(t -> fail("蓝奏二次验证刷新失败: " + t.getMessage()));
+    }
+
+    private void completeDownloadLink(String location) {
+        if (isIntermediateLanrar(location) || isIosInstallRedirect(location)) {
+            fail("蓝奏未解析到 CDN 直链");
+            return;
+        }
+        completeWithShareDate(location);
+    }
+
+    private static boolean isIntermediateLanrar(String url) {
+        if (url == null || url.isBlank()) {
+            return false;
+        }
+        String u = url.toLowerCase();
+        return u.contains("lanrar.com/file/") || (u.contains("/file/?") && u.contains("lanrar"));
+    }
+
+    /** Mac/iOS UA 会把 ipa 当成「Safari 在线安装」，302 到 itms-services/plist，不是直链。 */
+    private static boolean isIosInstallRedirect(String url) {
+        if (url == null || url.isBlank()) {
+            return false;
+        }
+        String u = url.toLowerCase();
+        return u.startsWith("itms-services:") || u.startsWith("itms:")
+                || u.contains(".plist")
+                || u.contains("ipa.lanrar.com");
+    }
+
+    /** 最后一步 GET 用完整浏览器导航头，裸 curl / 无 UA 会固定落到验证页。 */
+    private static MultiMap lanrarPageHeaders(String referer) {
+        MultiMap h = MultiMap.caseInsensitiveMultiMap();
+        h.addAll(PAGE_HEADERS);
+        h.set("referer", referer);
+        return h;
+    }
+
+    private static MultiMap lanrarAjaxHeaders(String referer) {
+        MultiMap h = HeaderUtils.parseHeaders(VERIFY_AJAX_HEADERS);
+        h.set("referer", referer);
+        copyHeader(h, "User-Agent", "User-Agent");
+        copyHeader(h, "Sec-CH-UA", "sec-ch-ua");
+        copyHeader(h, "Sec-CH-UA-Mobile", "sec-ch-ua-mobile");
+        copyHeader(h, "Sec-CH-UA-Platform", "sec-ch-ua-platform");
+        return h;
+    }
+
+    private static void copyHeader(MultiMap target, String from, String to) {
+        String v = PAGE_HEADERS.get(from);
+        if (v != null && !v.isBlank()) {
+            target.set(to, v);
+        }
+    }
+
+    private static String firstHttpLocation(HttpResponse<?> res) {
+        String loc = res.headers().get("Location");
+        if (loc == null) {
+            loc = res.headers().get("location");
+        }
+        return loc;
+    }
+
+    private static boolean isDirectLink(String url) {
+        if (url == null || url.isBlank() || url.contains("SignError") || url.contains("/file/?")) {
+            return false;
+        }
+        if (isIosInstallRedirect(url)) {
+            return false;
+        }
+        return url.startsWith("http://") || url.startsWith("https://");
+    }
+
+    private void putSessionCookie(String name, String value, String url, String fallbackDomain) {
+        DefaultCookie hostCookie = new DefaultCookie(name, value);
+        hostCookie.setPath("/");
+        hostCookie.setSecure(false);
+        hostCookie.setHttpOnly(false);
+        webClientSession.cookieStore().put(hostCookie);
+        String host = null;
+        try {
+            host = new URL(url).getHost();
+        } catch (Exception ignored) {}
+        if (host == null || host.isBlank()) {
+            host = fallbackDomain;
+        }
+        if (host != null && host.startsWith(".")) {
+            host = host.substring(1);
+        }
+        if (host != null && !host.isBlank()) {
+            DefaultCookie domainCookie = new DefaultCookie(name, value);
+            domainCookie.setDomain(host);
+            domainCookie.setPath("/");
+            domainCookie.setSecure(false);
+            domainCookie.setHttpOnly(false);
+            webClientSession.cookieStore().put(domainCookie);
+        }
+    }
+
+    private static String originOf(String url, String fallback) {
+        try {
+            URL u = new URL(url);
+            return u.getProtocol() + "://" + u.getHost();
+        } catch (Exception e) {
+            return fallback;
+        }
+    }
+
+    private static String hostOf(String url) {
+        try {
+            return new URL(url).getHost();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** u1305138.dmpdmp.com → dmpdmp.com；developer2.lanrar.com → lanrar.com */
+    private static String registrableDomain(String host) {
+        if (host == null || host.isBlank()) {
+            return null;
+        }
+        int last = host.lastIndexOf('.');
+        if (last <= 0) {
+            return host;
+        }
+        int prev = host.lastIndexOf('.', last - 1);
+        return prev >= 0 ? host.substring(prev + 1) : host;
+    }
+
+    private static String joinUrl(String base, String path) {
+        if (path == null || path.isBlank()) {
+            return base;
+        }
+        if (path.startsWith("http://") || path.startsWith("https://")) {
+            return path;
+        }
+        if (base.endsWith("/") && path.startsWith("/")) {
+            return base.substring(0, base.length() - 1) + path;
+        }
+        if (!base.endsWith("/") && !path.startsWith("/")) {
+            return base + "/" + path;
+        }
+        return base + path;
+    }
+
+    private void completeWithShareDate(String downloadUrl) {
+        // 分享时间 提取url中的时间戳格式：lanzoui.com/abc/abc/yyyy/mm/dd/
+        Matcher matcher = P_URL_DATE.matcher(downloadUrl);
+        if (matcher.find() && shareLinkInfo.getOtherParam().get("fileInfo") instanceof FileInfo fileInfo) {
+            fileInfo.setCreateTime(matcher.group().replace("/", "-"));
+        }
+        complete(downloadUrl);
+    }
+
+    /** 目录列表 filemoreajax.php 用移动端 UA。 */
+    private static MultiMap folderListHeaders(String referer) {
         MultiMap headers = MultiMap.caseInsensitiveMultiMap();
-        var userAgent2 = "Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, " +
-                "like " +
-                "Gecko) Chrome/111.0.0.0 Mobile Safari/537.36";
-        headers.set("User-Agent", userAgent2);
-        headers.set("referer", key);
+        headers.set("User-Agent", "Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 "
+                + "(KHTML, like Gecko) Chrome/111.0.0.0 Mobile Safari/537.36");
+        headers.set("referer", referer);
         headers.set("sec-ch-ua-platform", "Android");
         headers.set("Accept-Language", "zh-CN,zh;q=0.8,zh-TW;q=0.7,zh-HK;q=0.5,en-US;q=0.3,en;q=0.2");
-        headers.set("sec-ch-ua-mobile", "sec-ch-ua-mobile");
+        headers.set("sec-ch-ua-mobile", "?1");
         return headers;
     }
 
 
     @Override
     public Future<List<FileInfo>> parseFileList() {
-        Promise<List<FileInfo>> promise = Promise.promise();
+        Promise<List<FileInfo>> listPromise = Promise.promise();
 
-        String sUrl = shareLinkInfo.getShareUrl();
-        String pwd = shareLinkInfo.getSharePassword();
+        final String sUrl = resolveShareUrl();
+        final String pwd = shareLinkInfo.getSharePassword();
 
-        webClientSession.getAbs(sUrl).send().onSuccess(res -> {
-            try {
-                String html = asText(res);
-                // 检查是否需要 cookie 验证
-                if (hasAcwArg1(html)) {
-                    webClientSession = WebClientSession.create(clientNoRedirects);
-                    if (!setCookie(html, sUrl)) {
-                        promise.tryFail(baseMsg() + "蓝奏云反爬 arg1 Cookie 解析失败，页面内容异常");
-                        return;
-                    }
-                    // 重新请求
-                    webClientSession.getAbs(sUrl).send().onSuccess(res2 -> {
-                        try {
-                            handleFileListParse(asText(res2), pwd, sUrl, promise);
-                        } catch (Exception e) {
-                            promise.tryFail(e);
-                        }
-                    }).onFailure(promise::tryFail);
-                    return;
-                }
-                handleFileListParse(html, pwd, sUrl, promise);
-            } catch (Exception e) {
-                promise.tryFail(e);
+        getWithArg1Retry(sUrl, PAGE_HEADERS)
+                .onSuccess(html -> handleFileListParse(html, pwd, sUrl, listPromise))
+                .onFailure(listPromise::fail);
+        return listPromise.future();
+    }
+
+    private void handleFileListParse(String html, String pwd, String sUrl, Promise<List<FileInfo>> listPromise) {
+        if (!isLzFolderShare(sUrl, html)) {
+            listPromise.fail(baseMsg() + "该链接为蓝奏云文件分享，请使用文件解析接口");
+            return;
+        }
+        try {
+            String webpage = extractWebpage(sUrl, html);
+            if (webpage != null) {
+                shareLinkInfo.getOtherParam().put("webpage", webpage);
             }
-        }).onFailure(promise::tryFail);
-        return promise.future();
-    }
+            AjaxCall call = extractFolderAjax(html, pwd);
+            if (call == null) {
+                call = folderAjaxFromJs(html, pwd);
+            }
+            log.debug("解析参数: {}", call.form());
 
-    private void handleFileListParse(String html, String pwd, String sUrl, Promise<List<FileInfo>> promise) {
-        if (html == null || html.isBlank()) {
-            promise.tryFail(baseMsg() + "蓝奏云页面响应为空");
-            return;
-        }
-        if (isShareCancelledPage(html)) {
-            promise.tryFail(baseMsg() + "分享已失效或文件已取消分享");
-            return;
-        }
-        // 检测是否为文件分享链接 (不含 /s/、/b/ 路径段且不含 b 开头的路径段)
-        if (!sUrl.matches(".*/(s|b)/[^/]+.*") && !sUrl.matches(".*/b[^/]+.*")) {
-            promise.tryFail(baseMsg() + "该链接为蓝奏云文件分享，请使用文件解析接口");
-            return;
-        }
-        try {
-            String jsText = getJsByPwd(pwd, html, "var urls =window.location.href");
-            ScriptObjectMirror scriptObjectMirror = JsExecUtils.executeDynamicJs(jsText, "file");
-            Map<String, Object> data = CastUtil.cast(scriptObjectMirror.get("data"));
-            MultiMap map = MultiMap.caseInsensitiveMultiMap();
-            data.forEach((k, v) -> map.set(k, v.toString()));
-            log.debug("解析参数: {}", map);
-            MultiMap headers = getHeaders(sUrl);
-
-            String url = SHARE_URL_PREFIX + "filemoreajax.php?file=" + data.get("fid");
-            webClientSession.postAbs(url).putHeaders(headers).sendForm(map).onSuccess(res2 -> {
-                try {
-                    String resBody = asText(res2);
-                    // 再次检查是否需要 cookie 验证
-                    if (hasAcwArg1(resBody)) {
-                        if (!setCookie(resBody, url)) {
-                            promise.tryFail(baseMsg() + "蓝奏云反爬 arg1 Cookie 解析失败，页面内容异常");
-                            return;
-                        }
-                        // 重新请求
-                        webClientSession.postAbs(url).putHeaders(headers).sendForm(map).onSuccess(res3 -> {
-                            try {
-                                handleFileListResponse(asText(res3), promise);
-                            } catch (Exception e) {
-                                promise.tryFail(e);
-                            }
-                        }).onFailure(promise::tryFail);
-                        return;
-                    }
-                    handleFileListResponse(resBody, promise);
-                } catch (Exception e) {
-                    promise.tryFail(e);
-                }
-            }).onFailure(promise::tryFail);
+            postAjaxWithFallback(sUrl, call, folderListHeaders(sUrl),
+                    body -> handleFileListResponse(body, listPromise),
+                    listPromise::fail);
         } catch (ScriptException | NoSuchMethodException | RuntimeException e) {
-            promise.tryFail(e);
+            listPromise.fail(e);
         }
     }
 
-    private void handleFileListResponse(String responseBody, Promise<List<FileInfo>> promise) {
+    /** 正则匹配不到 filemoreajax 块时，回退到执行页面 JS 取参数。 */
+    private AjaxCall folderAjaxFromJs(String html, String pwd) throws ScriptException, NoSuchMethodException {
+        String jsText = getJsByPwd(pwd, html, "var urls =window.location.href");
+        ScriptObjectMirror mirror = JsExecUtils.executeDynamicJs(jsText, "file");
+        Map<String, Object> raw = CastUtil.cast(mirror.get("data"));
+        Map<String, String> form = new LinkedHashMap<>();
+        raw.forEach((k, v) -> form.put(k, String.valueOf(v)));
+        return new AjaxCall("/filemoreajax.php?file=" + form.get("fid"), form);
+    }
+
+    private boolean isLzFolderShare(String sUrl, String html) {
+        return isLzFolderUrl(sUrl)
+                || isLzFolderUrl(shareLinkInfo.getShareUrl())
+                || isLzFolderUrl(shareLinkInfo.getShareKey())
+                || isLzFolderHtml(html);
+    }
+
+    /** 目录：shareKey 以 b 开头（/b710887、/b0xxx），或 /s/ 自定义目录。没有 /b/ 这种路径。 */
+    static boolean isLzFolderUrl(String url) {
+        if (url == null || url.isBlank()) {
+            return false;
+        }
+        String path = lzSharePath(url);
+        if (path.isEmpty()) {
+            return false;
+        }
+        if (path.startsWith("s/")) {
+            return true;
+        }
+        // 单段路径才是分享 key；/tp/xxx 是手机端文件页
+        if (path.indexOf('/') >= 0) {
+            return false;
+        }
+        return path.charAt(0) == 'b' || path.charAt(0) == 'B';
+    }
+
+    private static boolean isLzFolderHtml(String html) {
+        if (html == null || html.isBlank()) {
+            return false;
+        }
+        return html.contains("filemoreajax") || html.contains("id=\"infos\"") || html.contains("id='infos'");
+    }
+
+    private static String lzSharePath(String url) {
+        String u = url.trim();
+        int q = u.indexOf('?');
+        if (q >= 0) {
+            u = u.substring(0, q);
+        }
+        int hash = u.indexOf('#');
+        if (hash >= 0) {
+            u = u.substring(0, hash);
+        }
+        int schemeEnd = u.indexOf("://");
+        if (schemeEnd >= 0) {
+            int pathStart = u.indexOf('/', schemeEnd + 3);
+            if (pathStart < 0) {
+                return "";
+            }
+            u = u.substring(pathStart + 1);
+        } else if (u.indexOf('/') >= 0 && u.indexOf('.') >= 0 && u.indexOf('.') < u.indexOf('/')) {
+            u = u.substring(u.indexOf('/') + 1);
+        }
+        while (u.startsWith("/")) {
+            u = u.substring(1);
+        }
+        while (u.endsWith("/")) {
+            u = u.substring(0, u.length() - 1);
+        }
+        return u;
+    }
+
+    private void handleFileListResponse(String responseBody, Promise<List<FileInfo>> listPromise) {
         try {
-            if (responseBody == null || responseBody.isBlank()) {
-                promise.tryFail(baseMsg() + "蓝奏云文件列表响应为空");
+            JsonObject fileListJson = parseLzJson(responseBody);
+            if (fileListJson == null) {
+                listPromise.fail(baseMsg() + "目录列表返回非JSON");
                 return;
             }
-            JsonObject fileListJson = new JsonObject(responseBody);
-            if (fileListJson.getInteger("zt") != 1) {
-                promise.tryFail(baseMsg() + fileListJson.getString("info"));
+            Integer zt = fileListJson.getInteger("zt");
+            if (zt == null || zt != 1) {
+                listPromise.fail(baseMsg() + fileListJson.getString("info"));
                 return;
             }
             List<FileInfo> list = new ArrayList<>();
@@ -571,11 +1285,16 @@ public class LzTool extends PanBase {
                 // 构建 base64 参数，用于 /v2/redirectUrl 接口
                 JsonObject paramJson = new JsonObject()
                         .put("id", id)
-                        .put("fileName", fileName);
+                        .put("fileName", fileName)
+                        .put("shareKey", shareLinkInfo.getShareKey());
+                String webpage = currentWebpage();
+                if (webpage != null) {
+                    paramJson.put("webpage", webpage);
+                }
                 String param = CommonUtils.urlBase64Encode(paramJson.encode());
                 fileInfo.setFileName(fileName)
                         .setFileId(id)
-                        .setCreateTime(parseLanzouFileTime(fileJson.getString("time")))
+                        .setCreateTime(fileJson.getString("time"))
                         .setFileType(fileJson.getString("icon"))
                         .setSizeStr(fileJson.getString("size"))
                         .setSize(sizeNum)
@@ -586,87 +1305,77 @@ public class LzTool extends PanBase {
                 log.debug("文件信息: {}", fileInfo);
                 list.add(fileInfo);
             });
-            promise.complete(list);
+            listPromise.complete(list);
         } catch (Exception e) {
-            promise.tryFail(e);
+            listPromise.fail(e);
         }
-    }
-
-    private static String parseLanzouFileTime(String timeText) {
-        if (timeText == null || timeText.isBlank()) {
-            return timeText;
-        }
-        String normalized = timeText.trim().replaceAll("\\s+", " ");
-        Matcher matcher = RELATIVE_TIME_PATTERN.matcher(normalized);
-        if (matcher.matches()) {
-            int amount = "几".equals(matcher.group(1)) ? 1 : Integer.parseInt(matcher.group(1));
-            String unit = matcher.group(2);
-            LocalDateTime time = LocalDateTime.now();
-            if ("小时".equals(unit)) {
-                time = time.minusHours(amount);
-            } else {
-                time = time.minusMinutes(amount);
-            }
-            return time.toLocalDate().toString();
-        }
-        matcher = DATE_PATTERN.matcher(normalized);
-        if (matcher.matches()) {
-            return LocalDate.of(
-                    Integer.parseInt(matcher.group(1)),
-                    Integer.parseInt(matcher.group(2)),
-                    Integer.parseInt(matcher.group(3))
-            ).toString();
-        }
-        matcher = MONTH_DAY_PATTERN.matcher(normalized);
-        if (matcher.matches()) {
-            return LocalDate.of(
-                    LocalDate.now().getYear(),
-                    Integer.parseInt(matcher.group(1)),
-                    Integer.parseInt(matcher.group(2))
-            ).toString();
-        }
-        return normalized;
     }
 
     @Override
     public Future<String> parseById() {
         JsonObject paramJson = (JsonObject) shareLinkInfo.getOtherParam().get("paramJson");
         String id = paramJson.getString("id");
-        // 以文件ID重新构造标准访问URL，复用 parse() 流程
-        shareLinkInfo.setStandardUrl(SHARE_URL_PREFIX + id);
+        if (id == null || id.isBlank()) {
+            fail("缺少文件ID");
+            return promise.future();
+        }
+        // getFileDownInfo 用 shareKey="-" 占位；目录内文件要按文件ID打开，并带上 webpage
+        String webpage = paramJson.getString("webpage");
+        if (webpage == null || webpage.isBlank()) {
+            webpage = extractWebpage(shareLinkInfo.getShareUrl(), null);
+        }
+        String fileUrl = sharePageHostBase(shareLinkInfo.getShareUrl(), shareLinkInfo.getStandardUrl()) + id;
+        if (webpage != null && !webpage.isBlank()) {
+            fileUrl = fileUrl + "?webpage=" + webpage;
+        }
+        shareLinkInfo.setShareKey(id);
+        shareLinkInfo.setShareUrl(fileUrl);
+        shareLinkInfo.setStandardUrl(fileUrl);
         return parse();
     }
 
+    private String currentWebpage() {
+        Object cached = shareLinkInfo.getOtherParam().get("webpage");
+        if (cached instanceof String s && !s.isBlank()) {
+            return s;
+        }
+        return extractWebpage(shareLinkInfo.getShareUrl(), null);
+    }
+
+    private static String extractWebpage(String url, String html) {
+        if (url != null) {
+            Matcher m = P_WEBPAGE.matcher(url);
+            if (m.find()) {
+                return m.group(1);
+            }
+        }
+        if (html != null) {
+            Matcher m = P_WEBPAGE.matcher(html);
+            if (m.find()) {
+                return m.group(1);
+            }
+        }
+        return null;
+    }
+
     void setFileInfo(String html, ShareLinkInfo shareLinkInfo) {
-        // 写入 fileInfo
         FileInfo fileInfo = new FileInfo();
         shareLinkInfo.getOtherParam().put("fileInfo", fileInfo);
         try {
-            // 提取文件名
-            String fileName = CommonUtils.extract(html, FILE_NAME_PATTERN);
-            String sizeStr  = CommonUtils.extract(html, FILE_SIZE_PATTERN);
-            String createBy = CommonUtils.extract(html, SHARE_USER_PATTERN);
-            String description = CommonUtils.extract(html, DESCRIPTION_PATTERN);
-            // String icon = CommonUtils.extract(html, Pattern.compile("class=\"n_file_icon\" src=\"(.*?)\""));
-            String fileId = CommonUtils.extract(html, FILE_ID_PATTERN);
-            String createTime = CommonUtils.extract(html, CREATE_TIME_PATTERN);
-            try {
-                fileInfo.setFileName(fileName)
-                        .setCreateBy(createBy)
-                        .setPanType(shareLinkInfo.getType())
-                        .setDescription(description)
-                        .setFileType("file")
-                        .setFileId(fileId)
-                        .setCreateTime(parseLanzouFileTime(createTime));
-                if (sizeStr != null && !sizeStr.isBlank()) {
-                    long bytes = FileSizeConverter.convertToBytes(sizeStr);
-                    fileInfo.setSize(bytes).setSizeStr(FileSizeConverter.convertToReadableSize(bytes));
-                }
-            } catch (Exception e) {
-                log.warn("文件信息解析异常", e);
+            String sizeStr = CommonUtils.extract(html, P_FI_SIZE);
+            fileInfo.setFileName(CommonUtils.extract(html, P_FI_NAME))
+                    .setCreateBy(CommonUtils.extract(html, P_FI_AUTHOR))
+                    .setPanType(shareLinkInfo.getType())
+                    .setDescription(CommonUtils.extract(html, P_FI_DESC))
+                    .setFileType("file")
+                    .setFileId(CommonUtils.extract(html, P_FI_ID))
+                    .setCreateTime(CommonUtils.extract(html, P_FI_TIME));
+            if (sizeStr != null && !sizeStr.isBlank()) {
+                long bytes = FileSizeConverter.convertToBytes(sizeStr);
+                fileInfo.setSize(bytes).setSizeStr(FileSizeConverter.convertToReadableSize(bytes));
             }
         } catch (Exception e) {
-            log.warn("文件信息匹配异常", e);
+            log.warn("文件信息解析异常", e);
         }
     }
 }

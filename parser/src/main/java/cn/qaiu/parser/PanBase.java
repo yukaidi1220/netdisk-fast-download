@@ -20,6 +20,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.*;
+import java.net.InetAddress;
+import java.net.URL;
+import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -201,6 +204,76 @@ public abstract class PanBase implements IPanTool, Closeable {
         }
     }
 
+    /**
+     * SSRF 防护: 校验通用自定义域名解析器 (CE/Ce4/Kd/Other 等) 即将请求的目标主机,
+     * 拒绝解析到回环/内网/链路本地/组播等非公网地址的域名, 阻止攻击者通过可控 DNS
+     * 记录 (或直接填写内网域名) 让服务端向内网/云元数据接口发起请求。
+     * <p>
+     * 必须在子类 parse() 中构造出 baseUrl/发起任何 clientSession 请求之前调用。
+     *
+     * @param url 从 shareLinkInfo.getShareUrl() 解析出的 URL
+     * @throws IOException 当主机无法解析或解析结果落入禁止的地址段时抛出
+     */
+    protected static void assertPublicHost(URL url) throws IOException {
+        String host = url.getHost();
+        InetAddress[] addresses;
+        try {
+            addresses = InetAddress.getAllByName(host);
+        } catch (UnknownHostException e) {
+            throw new IOException("无法解析目标主机: " + host, e);
+        }
+        if (addresses.length == 0) {
+            throw new IOException("无法解析目标主机: " + host);
+        }
+        for (InetAddress addr : addresses) {
+            if (isDisallowedAddress(addr)) {
+                throw new IOException("目标地址不允许访问(内网/回环/链路本地/组播): "
+                        + host + " -> " + addr.getHostAddress());
+            }
+        }
+    }
+
+    /**
+     * 判断地址是否落入禁止访问的范围: 0.0.0.0/8, 10/8, 127/8, 169.254/16(含云元数据
+     * 169.254.169.254), 172.16/12, 192.168/16, 100.64/10(CGNAT), 224/4~255/4(组播/保留),
+     * 以及对应的 IPv6 回环/链路本地/唯一本地地址(fc00::/7)/组播地址; IPv4-映射的 IPv6
+     * 地址(::ffff:a.b.c.d) 会先还原为 IPv4 再判断，避免绕过。
+     */
+    private static boolean isDisallowedAddress(InetAddress addr) {
+        byte[] bytes = addr.getAddress();
+        if (bytes.length == 16 && isIPv4Mapped(bytes)) {
+            byte[] v4 = new byte[4];
+            System.arraycopy(bytes, 12, v4, 0, 4);
+            bytes = v4;
+        }
+        if (bytes.length == 4) {
+            int b0 = bytes[0] & 0xFF;
+            int b1 = bytes[1] & 0xFF;
+            if (b0 == 0) return true;                          // 0.0.0.0/8
+            if (b0 == 10) return true;                         // 10.0.0.0/8
+            if (b0 == 127) return true;                        // 127.0.0.0/8 loopback
+            if (b0 == 169 && b1 == 254) return true;            // 169.254.0.0/16 (含云元数据 169.254.169.254)
+            if (b0 == 172 && b1 >= 16 && b1 <= 31) return true; // 172.16.0.0/12
+            if (b0 == 192 && b1 == 168) return true;            // 192.168.0.0/16
+            if (b0 == 100 && b1 >= 64 && b1 <= 127) return true;// 100.64.0.0/10 CGNAT
+            return b0 >= 224;                                   // 224.0.0.0/4 组播 + 240.0.0.0/4 保留
+        }
+        // IPv6
+        if (addr.isAnyLocalAddress() || addr.isLoopbackAddress()
+                || addr.isLinkLocalAddress() || addr.isSiteLocalAddress()
+                || addr.isMulticastAddress()) {
+            return true;
+        }
+        return bytes.length == 16 && (bytes[0] & 0xFE) == 0xFC; // fc00::/7 unique local
+    }
+
+    private static boolean isIPv4Mapped(byte[] b) {
+        for (int i = 0; i < 10; i++) {
+            if (b[i] != 0) return false;
+        }
+        return (b[10] & 0xFF) == 0xFF && (b[11] & 0xFF) == 0xFF;
+    }
+
     protected String baseMsg() {
         if (shareLinkInfo.getShareUrl() != null) {
             return shareLinkInfo.getPanName() + "-" + shareLinkInfo.getType() + ": url=" + shareLinkInfo.getShareUrl();
@@ -295,9 +368,12 @@ public abstract class PanBase implements IPanTool, Closeable {
         // 检查响应头中的Content-Encoding是否为gzip
         String contentEncoding = res.getHeader("Content-Encoding");
         try {
-            if ("gzip".equalsIgnoreCase(contentEncoding)) {
+            if ("gzip".equalsIgnoreCase(contentEncoding) && res.body() instanceof Buffer gzipBody
+                    && gzipBody.length() >= 2
+                    && (gzipBody.getByte(0) & 0xff) == 0x1f
+                    && (gzipBody.getByte(1) & 0xff) == 0x8b) {
                 // 如果是gzip压缩的响应体，解压（只解压一次，缓存结果）
-                String decompressed = decompressGzip((Buffer) res.body());
+                String decompressed = decompressGzip(gzipBody);
                 return new JsonObject(decompressed);
             } else {
                 return res.bodyAsJsonObject();
@@ -309,9 +385,10 @@ public abstract class PanBase implements IPanTool, Closeable {
                 log.error("响应gzip解压或JSON解析失败: {}", e.getMessage());
                 fail("响应gzip解压或JSON解析失败: {}", e.getMessage());
             } else {
+                // 上游响应体可能来自内网探测目标，仅写日志，避免经 HTTP 500 回传给调用方
                 String bodyPreview = responseBodyPreview(res);
                 log.error("解析失败: json格式异常: {}", bodyPreview);
-                fail("解析失败: json格式异常: {}", bodyPreview);
+                fail("解析失败: json格式异常");
             }
             return JsonObject.of();
         }
@@ -341,7 +418,18 @@ public abstract class PanBase implements IPanTool, Closeable {
     protected void completeWithMeta(String url, Map<String, String> headers) {
         shareLinkInfo.getOtherParam().put("downloadUrl", url);
         if (headers != null && !headers.isEmpty()) {
-            shareLinkInfo.getOtherParam().put("downloadHeaders", headers);
+            // 过滤 null/空值，避免 cookie:null 覆盖入口参数或污染 curl 命令
+            Map<String, String> clean = new HashMap<>();
+            headers.forEach((k, v) -> {
+                if (k != null && v != null && !v.isBlank()) {
+                    clean.put(k, v);
+                }
+            });
+            if (!clean.isEmpty()) {
+                shareLinkInfo.getOtherParam().put("downloadHeaders", clean);
+                // UC/夸克等需带 cookie 的直链，标记前端走下载器
+                shareLinkInfo.getOtherParam().put("needDownloader", true);
+            }
         }
         promise.complete(url);
     }
@@ -447,6 +535,34 @@ public abstract class PanBase implements IPanTool, Closeable {
 
     protected String getDomainName(){
         return shareLinkInfo.getOtherParam().getOrDefault("domainName", "").toString();
+    }
+
+    /**
+     * 将入口请求中的加密 auth 透传到子目录/下载链接，避免进入子目录后丢失认证。
+     * otherParam 中的 key 为 {@code _authQuery}（由 web 层写入）。
+     */
+    protected String appendAuthQuery(String url) {
+        if (StringUtils.isBlank(url) || shareLinkInfo == null || shareLinkInfo.getOtherParam() == null) {
+            return url;
+        }
+        Object authObj = shareLinkInfo.getOtherParam().get("_authQuery");
+        if (authObj == null) {
+            return url;
+        }
+        String auth = authObj.toString();
+        if (StringUtils.isBlank(auth)) {
+            return url;
+        }
+        // 已带 auth 则不再追加
+        if (url.contains("auth=")) {
+            return url;
+        }
+        try {
+            String encoded = java.net.URLEncoder.encode(auth, StandardCharsets.UTF_8);
+            return url + (url.contains("?") ? "&" : "?") + "auth=" + encoded;
+        } catch (Exception e) {
+            return url + (url.contains("?") ? "&" : "?") + "auth=" + auth;
+        }
     }
 
     @Override

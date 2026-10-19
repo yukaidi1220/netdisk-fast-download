@@ -6,8 +6,10 @@ QQ交流群：1017480890
 <a href="https://vertx-china.github.io"><img src="https://img.shields.io/badge/vert.x-4.5.27-blue?style=flat"></a>
 <a href="https://raw.githubusercontent.com/qaiu/netdisk-fast-download/master/LICENSE"><img src="https://img.shields.io/github/license/qaiu/netdisk-fast-download?style=flat"></a>
 <a href="https://github.com/qaiu/netdisk-fast-download/releases/"><img src="https://img.shields.io/github/v/release/qaiu/netdisk-fast-download?style=flat"></a>
+<a href="https://github.com/QAIU/netdisk-fast-download">
+  <img src="https://img.shields.io/github/stars/QAIU/netdisk-fast-download?style=flat&logo=github" alt="GitHub Stars">
+</a>
 <a href="https://atomgit.com/QAIU/netdisk-fast-download"><img src="https://atomgit.com/QAIU/netdisk-fast-download/star/badge.svg" alt="AtomGit"></a>
-<a href="https://oosmetrics.com/repo/qaiu/netdisk-fast-download"><img src="https://api.oosmetrics.com/api/v1/badge/achievement/826aa27a-6e59-4de5-b7fa-cd189f484035.svg"></a>
 <p align="center">
   <a href="https://trendshift.io/repositories/12101" target="_blank"><img src="https://trendshift.io/api/badge/repositories/12101" alt="qaiu%2Fnetdisk-fast-download | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
 </p>
@@ -16,13 +18,11 @@ QQ交流群：1017480890
 ![alt text](web-front/img/image.png)
 
 
-## 国内镜像
-
-本项目同步托管于 **AtomGit**，国内访问更流畅：👉 [https://atomgit.com/QAIU/netdisk-fast-download](https://atomgit.com/QAIU/netdisk-fast-download)
-
+> 本平台所有音乐解析工具不再维护，请移步[Sonder播放器](https://sodecode.qaiu.top)  
+> 需要百度，迅雷，UC，夸克的完整支持请使用[专业版](https://189.qaiu.top)  
 
 ## 介绍
-> netdisk-fast-download网盘直链解析可以把云盘分享链接转为直链，可广泛应用于各类下载站，资源站，个人博客，图床，APP下载更新，视频点播等领域。支持市面各大主流云盘的文件分享以及文件夹分享链接，已支持蓝奏云/蓝奏云优享/移动云云空间/小飞机盘/亿方云/123云盘/Cloudreve等，支持加密分享，以及部分网盘文件夹分享。  
+> netdisk-fast-download网盘直链解析可以把云盘分享链接转为直链，可广泛应用于各类下载站，资源站，个人博客，图床，APP下载更新，视频点播等领域。支持市面各大主流云盘的文件分享以及文件夹分享链接，已支持蓝奏云/蓝奏云优享/移动云云空间/小飞机盘/亿方云/123云盘/永硕E盘/Cloudreve等，支持加密分享，以及部分网盘文件夹分享。  
 
 [官方文档](https://nfd-parser.github.io/)  
 [API接入](https://nfdparser.apifox.cn/)  
@@ -30,24 +30,30 @@ QQ交流群：1017480890
 [公益解析，lz0站](https://lz0.qaiu.top)  
 [专业版](https://189.qaiu.top)  
   
-
 ## 快速开始
-命令行下载分享文件：  
-```shell
-curl -LOJ "https://lz.qaiu.top/parser?url=https://share.feijipan.com/s/Tk1F2kGQ&pwd=1234"  
-```
-或者使用wget:  
-```shell
-wget -O bilibili.mp4 "https://lz.qaiu.top/parser?url=https://share.feijipan.com/s/Tk1F2kGQ&pwd=1234"
-```
-或者使用浏览器[直接访问](https://nfd-parser.github.io/nfd-preview/preview.html?src=https%3A%2F%2Flz.qaiu.top%2Fparser%3Furl%3Dhttps%3A%2F%2Fshare.feijipan.com%2Fs%2FTk1F2kGQ&name=bilibili.mp4&ext=mp4):
-```
-### 调用演示站下载：
-https://lz.qaiu.top/parser?url=https://share.feijipan.com/s/Tk1F2kGQ&pwd=1234  
-### 调用演示站预览：
-https://nfd-parser.github.io/nfd-preview/preview.html?src=https%3A%2F%2Flz.qaiu.top%2Fparser%3Furl%3Dhttps%3A%2F%2Fshare.feijipan.com%2Fs%2FTk1F2kGQ&name=bilibili.mp4&ext=mp4  
 
+以带提取码的分享链接为例（提取码 `1234`），链接中含 `#`、`&`，作为 `url` 参数传入前必须做 URL 编码：
+
+`https://www.ecpan.cn/web/#/yunpanProxy?path=%2F%23%2Fdrive%2Foutside&data=70017ece572737b12b30709b7f029308eJD0&isShare=1`
+
+**命令行下载**
+
+```shell
+# curl
+curl -LOJ "https://lz.qaiu.top/parser?url=https%3A%2F%2Fwww.ecpan.cn%2Fweb%2F%23%2FyunpanProxy%3Fpath%3D%252F%2523%252Fdrive%252Foutside%26data%3D70017ece572737b12b30709b7f029308eJD0%26isShare%3D1&pwd=1234"
+
+# wget
+wget -O v01 "https://lz.qaiu.top/parser?url=https%3A%2F%2Fwww.ecpan.cn%2Fweb%2F%23%2FyunpanProxy%3Fpath%3D%252F%2523%252Fdrive%252Foutside%26data%3D70017ece572737b12b30709b7f029308eJD0%26isShare%3D1&pwd=1234"
 ```
+
+**短链方式**（key 取分享链接的 `data` 参数，提取码用 `@` 拼接）
+
+| 用途 | 地址 |
+| --- | --- |
+| 下载 | `https://lz.qaiu.top/ec/70017ece572737b12b30709b7f029308eJD0@1234` |
+| 在线预览 | [点击访问](https://nfd-parser.github.io/nfd-preview/preview.html?src=https%3A%2F%2Flz.qaiu.top%2Fec%2F70017ece572737b12b30709b7f029308eJD0%401234&name=v01&ext=mp4) |
+
+> 无提取码时去掉 `&pwd=1234` / `@1234` 即可；预览页 `src` 需编码（`@` → `%40`），用短链可避免二次编码。
 
 **解析器模块文档：** [parser/README.md](parser/README.md)
 
@@ -71,13 +77,14 @@ https://nfd-parser.github.io/nfd-preview/preview.html?src=https%3A%2F%2Flz.qaiu.
 - [移动云云空间-ec](https://www.ecpan.cn/web)
 - [小飞机网盘-fj](https://www.feijipan.com/)
 - [亿方云-fc](https://www.fangcloud.com/)
-- [123云盘-ye](https://www.123pan.com/)
+- [123云盘-ye](https://www.123pan.com/) ⚠️仅建议本地部署使用，需登录认证，公共/云端服务器风控严格建议自行部署（Windows 可直接用 run.bat 一键运行）
 - ~[115网盘(失效)-p115](https://115.com/)~
 - [文叔叔-ws](https://www.wenshushu.cn/)
 - [联想乐云-le](https://lecloud.lenovo.com/)
 - [QQ邮箱云盘-qqw](https://mail.qq.com/)
 - [QQ闪传-qqsc](https://nutty.qq.com/nutty/ssr/26797.html)
 - [城通网盘-ct](https://www.ctfile.com)
+- [永硕E盘-ys](https://www.ysepan.com/)（空间分享，如 `https://xxx.ysepan.com/`，密码为空间访问密码；多文件请用文件列表接口）
 - [网易云音乐分享链接-mnes](https://music.163.com)
 - [酷狗音乐分享链接-mkgs](https://www.kugou.com)
 - [酷我音乐分享链接-mkws](https://kuwo.cn)
@@ -94,7 +101,9 @@ https://nfd-parser.github.io/nfd-preview/preview.html?src=https%3A%2F%2Flz.qaiu.
 - Dropbox-pdp
 - iCloud-pic
 ### 专业版提供
-- 迅雷网盘-xl
+- 百度网盘开放平台-bd
+- 迅雷云盘开放平台-xl
+- [光鸭云盘开放平台-gy](https://www.guangyapan.com)
 - [夸克云盘-qk](https://pan.quark.cn/)
 - [UC云盘-uc](https://fast.uc.cn/)
 - [移动云盘-p139](https://yun.139.com/)
@@ -134,6 +143,7 @@ GET /json/parser?url={分享链接}&pwd={密码}
 ```
 GET /json/{网盘标识}/{分享key}@{密码}
 ```
+注意： 移动云云空间的 `分享key` 取分享链接中的 `data` 参数值
 
 #### 3. 文件夹解析（v0.1.8fixed3+）
 
@@ -178,6 +188,7 @@ GET /json/getFileList?url={分享链接}&pwd={密码}
 | UC网盘(UC) | **必须** | 必须配置 Cookie 才能解析 |
 | 小飞机网盘(FJ) | 可选 | 大文件（>100MB）需要认证 |
 | 蓝奏优享(IZ) | 可选 | 大文件需要认证 |
+| 123网盘(YE) | 可选 | 需要下载大文件/需要登录的分享时才需要认证，支持账号密码或 token/authorization |
 
 **使用示例**：
 ```
@@ -198,10 +209,37 @@ GET /parser?url={分享链接}&pwd={密码}&auth={加密后的认证参数}
   - 目的：防止客户端伪造失败计数请求
   - 建议：使用高强度随机字符串，且不要与 `authEncryptKey` 相同
 
-### 特殊说明
+#### `auth` 临时认证参数 与 `auths` 静态配置认证 的区别
 
-- 移动云云空间的 `分享key` 取分享链接中的 `data` 参数值
-- 移动云云空间、小飞机网盘的加密分享可忽略密码参数
+本项目存在两种互相独立的认证配置方式，作用范围不同，不要混淆：
+
+| 方式 | 配置位置 | 生效范围 | 适用场景 |
+|------|---------|---------|---------|
+| `auth` 临时认证参数 | 请求 URL 上的 `auth` 查询参数 | **仅当次请求**，优先级高于 app-dev.yml 中的静态配置 | 调用方按用户临时提供的账号/Cookie/token 解析，不同请求可携带不同认证信息 |
+| `auths` 静态配置认证 | `app-dev.yml` 的 `auths.<网盘标识>` 节点 | **服务端长期生效**，所有未携带 `auth` 参数的请求都会复用 | 部署方自己长期配置一份账号，供所有请求默认使用 |
+
+以 123网盘（`ye`）为例，`app-dev.yml` 中支持以下几种写法（三选一即可）：
+
+```yaml
+auths:
+  ye:
+    username: 你的123网盘账号
+    password: 你的123网盘密码
+```
+```yaml
+auths:
+  ye:
+    token: 已登录后获取的 Authorization/AccessToken
+```
+```yaml
+auths:
+  ye:
+    authorization: 已登录后获取的 Authorization/AccessToken   # 与 token 等价，二选一
+```
+
+> ⚠️ 注意：YAML 中 key 后面不写值（如 `authorization:` 空着）等同于没配置，不会生效，必须填入真实的账号密码或 token 内容。
+
+如果只是临时调用一次，不想改动服务端配置，也可以用上面提到的 `auth` 参数临时传递（`authType` 可选 `password`/`accesstoken`/`authorization`），无需重启服务，仅本次请求生效。
 
 ### 示例
 
@@ -278,8 +316,11 @@ json返回数据格式示例:
     "timestamp": 1736489219402
 }
 ```
-#### 3. 文件夹解析(仅支持蓝奏云/蓝奏优享/小飞机网盘)
+#### 3. 文件夹解析(支持蓝奏云/蓝奏优享/小飞机/永硕E盘等)
 /v2/getFileList?url=分享链接&pwd=分享密码
+
+永硕E盘（`ys`）空间链接先返回目录列表，再带 `dirId` 获取目录内文件：
+`/v2/getFileList?url=https://xxx.ysepan.com/&pwd=空间密码&dirId=目录编号`
 
 ```json
 {
@@ -336,6 +377,7 @@ json返回数据格式示例:
 | 360亿方云      | √       | √        | 100G(须实名) | 不限大小            | 
 | 123云盘       | √       | √        | 2T        | 100G（>100M需要登录） | 
 | 文叔叔         | √       | √        | 10G       | 5GB             | 
+| 永硕E盘        | √       | √(空间密码) | 视套餐       | 视套餐            |
 | WPS云文档      | √       | X        | 5G(免费)   | 10M(免费)/2G(会员)  |
 | 夸克网盘        | x       | √        | 10G       | 不限大小            | 
 | UC网盘        | x       | √        | 10G       | 不限大小            | 
@@ -419,8 +461,8 @@ docker run --rm -v /var/run/docker.sock:/var/run/docker.sock containrrr/watchtow
 > 注意: netdisk-fast-download.service中的ExecStart的路径改为实际路径
 ```shell
 cd ~
-wget -O netdisk-fast-download.zip https://github.com/qaiu/netdisk-fast-download/releases/download/v3.0.2/netdisk-fast-download-bin.zip
-unzip netdisk-fast-download-bin.zip
+wget -O netdisk-fast-download.zip https://github.com/qaiu/netdisk-fast-download/releases/download/v0.4.8/netdisk-fast-download-linux-amd64.zip
+unzip netdisk-fast-download.zip
 cd netdisk-fast-download
 bash service-install.sh
 ```
@@ -500,13 +542,30 @@ Core模块集成Vert.x实现类似spring的注解式路由API
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=qaiu/netdisk-fast-download&type=Date)](https://star-history.com/#qaiu/netdisk-fast-download&Date)
+<a href="https://www.star-history.com/?repos=qaiu%2Fnetdisk-fast-download&type=date&legend=bottom-right">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=qaiu/netdisk-fast-download&type=date&theme=dark&legend=bottom-right&sealed_token=dfQO_dJcTqcPkEnM7SfxRyHoFbV5Ah4LxoEhdlheMn4T2YLEV_WETxFZexeAbWN5OmNyYuycWan2d42PAFbw0CuU4oCTKgehfErFJ9eVl2CyVpP_4xrdQw" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=qaiu/netdisk-fast-download&type=date&legend=bottom-right&sealed_token=dfQO_dJcTqcPkEnM7SfxRyHoFbV5Ah4LxoEhdlheMn4T2YLEV_WETxFZexeAbWN5OmNyYuycWan2d42PAFbw0CuU4oCTKgehfErFJ9eVl2CyVpP_4xrdQw" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=qaiu/netdisk-fast-download&type=date&legend=bottom-right&sealed_token=dfQO_dJcTqcPkEnM7SfxRyHoFbV5Ah4LxoEhdlheMn4T2YLEV_WETxFZexeAbWN5OmNyYuycWan2d42PAFbw0CuU4oCTKgehfErFJ9eVl2CyVpP_4xrdQw" />
+ </picture>
+</a>
 
-## **免责声明**  
-   - 用户在使用本项目时，应自行承担风险，并确保其行为符合当地法律法规。开发者不对用户因使用本项目而导致的任何后果负责。
 
-## 支持该项目
-开源不易，用爱发电，本项目长期维护如果觉得有帮助, 可以请作者喝杯咖啡, 感谢支持  
+## **声明**  
+
+- 本项目**仅供个人学习与技术交流使用**，请勿用于商业用途或大规模滥用。
+- 所用接口均来自各网盘**官方开放平台**、官方公开接口及**已知开源项目**，仅解析用户主动提供的分享链接，**不涉及破解或绕过版权保护**。
+- 本项目**相当于自动化程序代替用户发起请求**，**不会提升或绕过任何会员权限**，也**不会突破网盘的限速策略**；我们**鼓励用户开通官方 VIP/SVIP**以获得更好的下载与加速体验。
+- 使用者应遵守各网盘服务商的**用户协议与使用条款**，以及所在地区的**法律法规**，违反所产生的后果自行承担。
+- **高频调用可能触发网盘风控**，导致**账号限流、封禁**或**来源 IP 被屏蔽**，请合理控制请求频率，避免高并发与批量请求。
+- 网盘接口调整、风控策略变更等因素可能导致功能失效，本项目**不对可用性与稳定性作任何担保**。
+- 开发者**不对**使用本项目产生的**任何直接或间接损失**（账号封禁、数据丢失、法律纠纷等）**承担责任**。
+- 开发者保留**随时修改本免责声明**的权利，恕不另行通知。
+- **下载、部署或使用本项目，即视为您已阅读并接受上述全部条款。**
+
+
+## 赞助该项目
+开源不易，用爱发电，本项目长期维护如果觉得有帮助, 可以请开发者[喝杯咖啡](https://blog.qaiu.top/archives/da-shang-zhuan-yong), 感谢支持。  
 
 本项目的服务器由林枫云提供赞助<br>
 </a>

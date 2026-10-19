@@ -5,14 +5,17 @@ import cn.qaiu.entity.ShareLinkInfo;
 import cn.qaiu.lz.common.cache.CacheConfigLoader;
 import cn.qaiu.lz.common.cache.CacheManager;
 import cn.qaiu.lz.common.cache.CacheTotalField;
+import cn.qaiu.lz.common.util.ParserAuthUtil;
 import cn.qaiu.lz.common.util.URLParamUtil;
 import cn.qaiu.lz.web.model.CacheLinkInfo;
 import cn.qaiu.lz.web.service.CacheService;
+import cn.qaiu.lz.web.service.DbService;
 import cn.qaiu.parser.IPanTool;
 import cn.qaiu.parser.ParserCreate;
 import cn.qaiu.parser.clientlink.ClientLinkGeneratorFactory;
 import cn.qaiu.parser.clientlink.ClientLinkType;
 import cn.qaiu.vx.core.annotaions.Service;
+import cn.qaiu.vx.core.util.AsyncServiceUtil;
 import io.vertx.core.Future;
 import io.vertx.core.Promise;
 import io.vertx.core.json.JsonObject;
@@ -27,9 +30,10 @@ import java.util.Map;
 @Slf4j
 public class CacheServiceImpl implements CacheService {
 
-    private static final String SKIP_CLIENT_LINKS = "_skipClientLinks";
+    private static final String SKIP_CLIENT_LINKS = ParserAuthUtil.SKIP_CLIENT_LINKS;
 
     private final CacheManager cacheManager = new CacheManager();
+    private final DbService dbService = AsyncServiceUtil.getAsyncServiceInstance(DbService.class);
 
     static {
         // 服务类加载时注册缓存定时清理任务
@@ -71,7 +75,9 @@ public class CacheServiceImpl implements CacheService {
                     promise.fail(cause);
                     return;
                 }
-                IPanTool.closeAfter(tool, tool::parse).onSuccess(redirectUrl -> {
+                IPanTool.closeAfter(tool, tool::parse).onFailure(err -> {
+                    ParserAuthUtil.recordAutoDonatedFailureIfNeeded(dbService, shareLinkInfo, err);
+                }).onSuccess(redirectUrl -> {
                     // 使用 effectiveCacheDuration
                     long expires = System.currentTimeMillis() + effectiveCacheDuration * 60 * 1000L;
                     result.setDirectLink(redirectUrl);
@@ -180,6 +186,11 @@ public class CacheServiceImpl implements CacheService {
             // 传递 downloadHeaders 到两个对象
             cacheLinkInfo.getOtherParam().put("downloadHeaders", downloadHeaders);
             result.getOtherParam().put("downloadHeaders", downloadHeaders);
+            // 有特殊下载头时标记需要下载器（浏览器无法带 cookie 直连）
+            if (!downloadHeaders.isEmpty()) {
+                cacheLinkInfo.getOtherParam().put("needDownloader", true);
+                result.getOtherParam().put("needDownloader", true);
+            }
             
             // 使用已有的工具类生成下载命令
             generateCommandsFromShareLinkInfo(shareLinkInfo, cacheLinkInfo, result);
@@ -278,8 +289,9 @@ public class CacheServiceImpl implements CacheService {
         } catch (Exception e) {
             return Future.failedFuture(e);
         }
-        parserCreate.getShareLinkInfo().getOtherParam().putAll(otherParam.getMap());
-        return getAndSaveCachedShareLink(parserCreate);
+        ParserCreate finalParserCreate = parserCreate;
+        return ParserAuthUtil.applyAuthParamsAndDonatedFallback(finalParserCreate, otherParam, dbService)
+                .compose(v -> getAndSaveCachedShareLink(finalParserCreate));
     }
 
     @Override
@@ -290,22 +302,8 @@ public class CacheServiceImpl implements CacheService {
         } catch (Exception e) {
             return Future.failedFuture(e);
         }
-        parserCreate.getShareLinkInfo().getOtherParam().putAll(otherParam.getMap());
-        
-        // 检查是否有临时认证参数
-        if (otherParam.containsKey("authType") || otherParam.containsKey("authToken")) {
-            log.debug("从otherParam中检测到临时认证参数");
-            URLParamUtil.addTempAuthParam(parserCreate, 
-                otherParam.getString("authType"),
-                otherParam.getString("authToken"),
-                otherParam.getString("authPassword"),
-                otherParam.getString("authInfo1"),
-                otherParam.getString("authInfo2"),
-                otherParam.getString("authInfo3"),
-                otherParam.getString("authInfo4"),
-                otherParam.getString("authInfo5"));
-        }
-        
-        return getAndSaveCachedShareLink(parserCreate);
+        ParserCreate finalParserCreate = parserCreate;
+        return ParserAuthUtil.applyAuthParamsAndDonatedFallback(finalParserCreate, otherParam, dbService)
+                .compose(v -> getAndSaveCachedShareLink(finalParserCreate));
     }
 }

@@ -121,9 +121,9 @@ public enum PanDomainTemplate {
             "https://lecloud.lenovo.com/share/{shareKey}",
             LeTool.class),
 
-    // https://v2.fangcloud.com/s/
+    // https://v2.fangcloud.com/s/  https://v2.fangcloud.cn/h5/share/ (移动端H5落地页)
     FC("亿方云",
-            compile("https://v2\\.fangcloud\\.(com|cn)/(s|share|sharing)/(?<KEY>.+)"),
+            compile("https://v2\\.fangcloud\\.(com|cn)/(?:h5/)?(s|share|sharing)/(?<KEY>.+)"),
             "https://v2.fangcloud.com/s/{shareKey}",
             "https://www.fangcloud.com/",
             FcTool.class),
@@ -208,7 +208,7 @@ public enum PanDomainTemplate {
         123795.com
      */
     YE("123网盘",
-            compile("https://www\\.(" +
+            compile("https://(?:[a-zA-Z\\d-]+\\.)*(" +
                     "123254\\.com|" +
                     "123957\\.com|" +
                     "123295\\.com|" +
@@ -232,7 +232,7 @@ public enum PanDomainTemplate {
                     "123635\\.com|" +
                     "123242\\.com|" +
                     "123795\\.com"  +
-                    ")/s/(?<KEY>[a-zA-Z0-9_-]+)(?:\\.html)?"),
+                    ")/(?:(?:s|123pan)/|(?:[^/?#]+/)+)?(?<KEY>[a-zA-Z0-9]+-[a-zA-Z0-9]+|[a-zA-Z0-9_-]+)(?:\\.html)?(?:\\?.*)?"),
             "https://www.123pan.com/s/{shareKey}",
             Ye2Tool.class),
     // https://www.ecpan.cn/web/#/yunpanProxy?path=%2F%23%2Fdrive%2Foutside&data={code}&isShare=1
@@ -376,6 +376,16 @@ public enum PanDomainTemplate {
             "https://music.migu.cn/v3/music/song/{shareKey}",
             MmgTool.class),
     // =====================私有盘解析==========================
+
+    // 永硕E盘空间分享：https://qaiu.ysepan.com/ （空间名即 shareKey，密码为空间访问密码）
+    // 主域名 ysepan.com / ys168.com；备用 cccpan.com / ysupan.com / uupan.net / ysok.net
+    YS("永硕E盘",
+            compile("https?://(?!(?:www|zy|ht|api|c\\d+|ys-[a-zA-Z0-9]+)\\.)(?<KEY>[a-zA-Z\\d-]+)\\."
+                    + "(?:ysepan\\.com|ys168\\.com|cccpan\\.com|ysupan\\.com|uupan\\.net|ysok\\.net)"
+                    + "/?(?:\\?.*)?"),
+            "https://{shareKey}.ysepan.com/",
+            "https://www.ysepan.com/",
+            YsTool.class),
 
     // Cloudreve自定义域名解析, 解析器CeTool兜底策略, 即任意域名如果匹配不到对应的规则, 则由CeTool统一处理,
     // 如果不属于Cloudreve盘 则调用下一个自定义域名解析器, 若都处理不了则抛出异常, 这种匹配模式类似责任链

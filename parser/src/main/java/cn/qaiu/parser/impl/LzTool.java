@@ -512,6 +512,10 @@ public class LzTool extends PanBase {
     }
 
     private void doParser(String html, String pwd, String sUrl) {
+        if (isShareCancelledPage(html)) {
+            fail("分享已失效或文件已取消分享");
+            return;
+        }
         if (isLzFolderShare(sUrl, html)) {
             fail("该链接为蓝奏云目录分享，请使用目录解析接口");
             return;
@@ -575,14 +579,40 @@ public class LzTool extends PanBase {
     }
 
     private boolean applyArg1Cookie(String html, String url) {
-        int beginIndex = html.indexOf("arg1='") + 6;
-        int endIndex = html.indexOf("';", beginIndex);
-        if (beginIndex < 6 || endIndex == -1 || endIndex <= beginIndex) {
+        String arg1 = extractAcwArg1(html);
+        if (arg1 == null) {
             return false;
         }
-        String arg1 = html.substring(beginIndex, endIndex);
         putSessionCookie("acw_sc__v2", AcwScV2Generator.acwScV2Simple(arg1), url, null);
         return true;
+    }
+
+    /**
+     * 从 ESA 挑战页取出 arg1 值，取不到返回 null（不抛异常，交由调用方判定失败）。
+     */
+    static String extractAcwArg1(String html) {
+        if (html == null) {
+            return null;
+        }
+        int beginIndex = html.indexOf("arg1='");
+        if (beginIndex < 0) {
+            return null;
+        }
+        beginIndex += 6;
+        int endIndex = html.indexOf("';", beginIndex);
+        if (endIndex <= beginIndex) {
+            return null;
+        }
+        return html.substring(beginIndex, endIndex);
+    }
+
+    /**
+     * 蓝奏旧版失效页文案（"来晚啦…取消分享" / class="off"），与 P_OFF_MSG 的 off1 结构互补。
+     */
+    static boolean isShareCancelledPage(String html) {
+        return html != null
+                && ((html.contains("来晚啦") && html.contains("取消分享"))
+                || (html.contains("class=\"off\"") && html.contains("取消分享")));
     }
 
     private String getJsByPwd(String pwd, String html, String subText) {

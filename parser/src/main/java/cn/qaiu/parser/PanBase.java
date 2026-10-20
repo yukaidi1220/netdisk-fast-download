@@ -7,6 +7,7 @@ import io.vertx.core.Future;
 import io.vertx.core.Handler;
 import io.vertx.core.MultiMap;
 import io.vertx.core.Promise;
+import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.json.JsonObject;
 import io.vertx.core.net.ProxyOptions;
@@ -62,6 +63,7 @@ public abstract class PanBase implements IPanTool, Closeable {
     private static volatile WebClient sharedClient;
     private static volatile WebClient sharedClientNoRedirects;
     private static volatile WebClient sharedClientDisableUA;
+    private static volatile Vertx sharedClientsVertx;
     private static volatile boolean sharedClientsShutdown = false;
 
     /**
@@ -143,13 +145,32 @@ public abstract class PanBase implements IPanTool, Closeable {
     protected PanBase() {
     }
 
+    /**
+     * WebClient 绑死在创建它的 Vert.x 实例上；持有器换实例后旧 client 的 event loop 可能已终止
+     * （表现为 RejectedExecutionException: event executor terminated），所以整套作废重建。
+     */
+    private static void retargetSharedClients(Vertx current) {
+        if (sharedClientsVertx == current && sharedClient != null) {
+            return;
+        }
+        closeSharedClient(sharedClient, "shared WebClient");
+        closeSharedClient(sharedClientNoRedirects, "shared WebClientNoRedirects");
+        closeSharedClient(sharedClientDisableUA, "shared WebClientDisableUA");
+        sharedClient = null;
+        sharedClientNoRedirects = null;
+        sharedClientDisableUA = null;
+        sharedClientsVertx = current;
+    }
+
     private static WebClient sharedClient() {
         synchronized (SHARED_CLIENT_LOCK) {
             if (sharedClientsShutdown) {
                 throw new IllegalStateException("共享 WebClient 已关闭");
             }
+            Vertx current = WebClientVertxInit.get();
+            retargetSharedClients(current);
             if (sharedClient == null) {
-                sharedClient = WebClient.create(WebClientVertxInit.get(), new WebClientOptions(SHARED_OPTIONS));
+                sharedClient = WebClient.create(current, new WebClientOptions(SHARED_OPTIONS));
             }
             return sharedClient;
         }
@@ -160,8 +181,10 @@ public abstract class PanBase implements IPanTool, Closeable {
             if (sharedClientsShutdown) {
                 throw new IllegalStateException("共享 WebClient 已关闭");
             }
+            Vertx current = WebClientVertxInit.get();
+            retargetSharedClients(current);
             if (sharedClientNoRedirects == null) {
-                sharedClientNoRedirects = WebClient.create(WebClientVertxInit.get(),
+                sharedClientNoRedirects = WebClient.create(current,
                         new WebClientOptions(SHARED_OPTIONS).setFollowRedirects(false));
             }
             return sharedClientNoRedirects;
@@ -173,8 +196,10 @@ public abstract class PanBase implements IPanTool, Closeable {
             if (sharedClientsShutdown) {
                 throw new IllegalStateException("共享 WebClient 已关闭");
             }
+            Vertx current = WebClientVertxInit.get();
+            retargetSharedClients(current);
             if (sharedClientDisableUA == null) {
-                sharedClientDisableUA = WebClient.create(WebClientVertxInit.get(),
+                sharedClientDisableUA = WebClient.create(current,
                         new WebClientOptions(SHARED_OPTIONS).setUserAgentEnabled(false));
             }
             return sharedClientDisableUA;
@@ -190,6 +215,7 @@ public abstract class PanBase implements IPanTool, Closeable {
             sharedClient = null;
             sharedClientNoRedirects = null;
             sharedClientDisableUA = null;
+            sharedClientsVertx = null;
         }
     }
 

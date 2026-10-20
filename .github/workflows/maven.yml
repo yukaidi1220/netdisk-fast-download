@@ -10,7 +10,7 @@ on:
     tags:
       - 'v*'
     branches-ignore:
-      - '*'
+      - '**'
     paths-ignore:
       - 'bin/**'
       - '.github/**'

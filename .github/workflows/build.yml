@@ -37,9 +37,13 @@ jobs:
         
     - name: 编译项目
       run: ./mvnw clean compile
-      
-#    - name: 运行测试
-#      run: ./mvnw test
-      
+
     - name: 打包项目
       run: ./mvnw package -DskipTests
+
+    # 根 pom 的 surefire 写死 skipTests=true，CI 从不执行用例；这里在 runner 上临时打开，
+    # 并用 failure.ignore 只暴露结果不阻断构建（存量失败类见 out/review 的对照臂记录）。
+    - name: 运行测试（报告用，不阻断）
+      run: |
+        sed -i 's|<skipTests>true</skipTests>|<skipTests>false</skipTests>|' pom.xml
+        ./mvnw -B -Dmaven.test.failure.ignore=true test

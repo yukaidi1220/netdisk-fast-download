@@ -42,6 +42,7 @@ public class JsParserTest {
     public void testJsParserRegistration() {
         // 清理注册表
         CustomParserRegistry.clear();
+        CustomParserRegistry.autoLoadJsScripts();
 
         // 检查是否加载了JavaScript解析器
         CustomParserConfig config = CustomParserRegistry.get("demo_js");
@@ -56,6 +57,7 @@ public class JsParserTest {
     public void testJsParserExecution() {
         // 清理注册表
         CustomParserRegistry.clear();
+        CustomParserRegistry.autoLoadJsScripts();
 
         try {
             // 创建解析器
@@ -83,6 +85,7 @@ public class JsParserTest {
     public void testJsParserFileList() {
         // 清理注册表
         CustomParserRegistry.clear();
+        CustomParserRegistry.autoLoadJsScripts();
 
         try {
             // 创建解析器
@@ -119,6 +122,7 @@ public class JsParserTest {
     public void testJsParserById() {
         // 清理注册表
         CustomParserRegistry.clear();
+        CustomParserRegistry.autoLoadJsScripts();
 
         try {
             // 创建ShareLinkInfo

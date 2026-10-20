@@ -123,8 +123,16 @@ public final class ReflectionUtil {
             MethodInfo methodInfo = cm.getMethodInfo();
             CtClass[] parameterTypes = cm.getParameterTypes();
             CodeAttribute codeAttribute = methodInfo.getCodeAttribute();
+            if (codeAttribute == null) {
+                throw new IllegalStateException("无法解析方法参数名（缺少 CodeAttribute，构建时未保留调试信息）: "
+                        + method.getDeclaringClass().getName() + "#" + method.getName());
+            }
             LocalVariableAttribute attr =
                     (LocalVariableAttribute) codeAttribute.getAttribute(LocalVariableAttribute.tag);
+            if (attr == null) {
+                throw new IllegalStateException("无法解析方法参数名（缺少 LocalVariableTable，构建时未保留调试信息）: "
+                        + method.getDeclaringClass().getName() + "#" + method.getName());
+            }
 
             boolean flag = true;
             boolean flag2 = cm.getModifiers() - 1 != AccessFlag.STATIC;
@@ -136,7 +144,12 @@ public final class ReflectionUtil {
                     continue;
                 }
                 flag = false;
-                paramMap.put(attr.variableName(j + (flag2 ? 1 : 0)), Pair.of(parameterAnnotations[j - k],
+                String paramName = attr.variableName(j + (flag2 ? 1 : 0));
+                if (paramName == null) {
+                    throw new IllegalStateException("无法解析方法参数名（LocalVariableTable 在第 " + j
+                            + " 项没有对应变量名）: " + method.getDeclaringClass().getName() + "#" + method.getName());
+                }
+                paramMap.put(paramName, Pair.of(parameterAnnotations[j - k],
                         parameterTypes[j - k]));
             }
         } catch (NotFoundException e) {

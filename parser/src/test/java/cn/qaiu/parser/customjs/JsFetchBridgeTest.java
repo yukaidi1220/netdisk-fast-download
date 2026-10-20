@@ -115,10 +115,12 @@ public class JsFetchBridgeTest {
                 });
                 
                 // 等待Promise完成（简单同步等待）
+                // 这里不能用 java.lang.Thread.sleep：SecurityClassFilter 把 java.lang.Thread
+                // 列在危险类黑名单里，JS 调用它会被拦成 ClassNotFoundException。
                 var timeout = 1000;
                 var start = Date.now();
                 while (result === null && (Date.now() - start) < timeout) {
-                    java.lang.Thread.sleep(10);
+                    // 空转等待，Promise 由 Vert.x event loop 线程置结果
                 }
                 
                 if (result === null) {

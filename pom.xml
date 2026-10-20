@@ -91,13 +91,16 @@
                 </configuration>
             </plugin>
 
-            <!-- 跳过测试类-->
+            <!-- 测试执行配置：这些用例会往 WebClientVertxInit 的全局静态持有器里装自己的
+                 Vert.x，共用一个 JVM 时后跑的类会继承前一个类关掉的实例。
+                 因此每个测试类独立 fork，互不污染。 -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>2.22.2</version>
                 <configuration>
                      <skipTests>true</skipTests>
+                    <reuseForks>false</reuseForks>
                 </configuration>
             </plugin>
             <plugin>

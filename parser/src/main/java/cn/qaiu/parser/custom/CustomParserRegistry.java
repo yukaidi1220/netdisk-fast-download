@@ -156,6 +156,12 @@ public class CustomParserRegistry {
             
             for (CustomParserConfig config : configs) {
                 try {
+                    String type = config.getType() == null ? null : config.getType().toLowerCase();
+                    if (type != null && CUSTOM_PARSERS.containsKey(type)) {
+                        // autoLoadJsScripts() 由 WebClientVertxInit.init() 触发，init 可能被调多次
+                        // （测试里每个用例都会 init），已注册的类型跳过即可，不该记成加载失败。
+                        continue;
+                    }
                     registerJs(config);
                     successCount++;
                 } catch (Exception e) {

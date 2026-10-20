@@ -43,6 +43,7 @@ public class BaiduPhotoParserTest {
     public void testBaiduPhotoParserRegistration() {
         // 清理注册表
         CustomParserRegistry.clear();
+        CustomParserRegistry.autoLoadJsScripts();
 
         // 检查是否加载了百度相册解析器
         CustomParserConfig config = CustomParserRegistry.get("baidu_photo");
@@ -57,6 +58,7 @@ public class BaiduPhotoParserTest {
     public void testBaiduPhotoFileShareExecution() {
         // 清理注册表
         CustomParserRegistry.clear();
+        CustomParserRegistry.autoLoadJsScripts();
 
         try {
             // 创建解析器 - 测试文件分享链接
@@ -85,6 +87,7 @@ public class BaiduPhotoParserTest {
     public void testBaiduPhotoFolderShareExecution() {
         // 清理注册表
         CustomParserRegistry.clear();
+        CustomParserRegistry.autoLoadJsScripts();
 
         try {
             // 创建解析器 - 测试文件夹分享链接
@@ -113,6 +116,7 @@ public class BaiduPhotoParserTest {
     public void testBaiduPhotoParserFileList() {
         // 清理注册表
         CustomParserRegistry.clear();
+        CustomParserRegistry.autoLoadJsScripts();
 
         try {
             IPanTool tool = ParserCreate.fromType("baidu_photo")
@@ -167,6 +171,7 @@ public class BaiduPhotoParserTest {
     public void testBaiduPhotoParserById() {
         // 清理注册表
         CustomParserRegistry.clear();
+        CustomParserRegistry.autoLoadJsScripts();
 
         try {
             // 创建ShareLinkInfo

@@ -1,8 +1,12 @@
 package cn.qaiu.parser.impl;
 
+import org.junit.AfterClass;
+import org.junit.BeforeClass;
 import org.junit.Test;
 
+import cn.qaiu.WebClientVertxInit;
 import cn.qaiu.parser.ParserCreate;
+import io.vertx.core.Vertx;
 import io.vertx.core.json.JsonObject;
 
 import java.net.URLDecoder;
@@ -17,6 +21,25 @@ import java.util.regex.Pattern;
  * WPS 云文档解析测试
  */
 public class WpsPanTest {
+
+    private static Vertx vertx;
+
+    /**
+     * createTool() 需要 WebClientVertxInit 里的 Vert.x；测试类各自独立 JVM 后，
+     * 不能再依赖别的测试类留在静态持有器里的实例。
+     */
+    @BeforeClass
+    public static void initVertx() {
+        vertx = Vertx.vertx();
+        WebClientVertxInit.init(vertx);
+    }
+
+    @AfterClass
+    public static void closeVertx() {
+        if (vertx != null) {
+            vertx.close();
+        }
+    }
 
     @Test
     public void testWpsDownload() throws InterruptedException {

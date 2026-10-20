@@ -4,6 +4,7 @@ import cn.qaiu.WebClientVertxInit;
 import cn.qaiu.util.HttpResponseHelper;
 import io.vertx.core.MultiMap;
 import io.vertx.core.Promise;
+import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.http.HttpClient;
 import io.vertx.core.http.HttpClientOptions;
@@ -58,7 +59,9 @@ public class JsHttpClient {
 
     private static final Object SHARED_CLIENT_LOCK = new Object();
     // 共享 HttpClient 实例（非代理模式），懒加载避免类初始化阶段抢跑 Vert.x。
+    // 同时记录它所属的 Vertx：client 绑死在创建它的实例上，持有器换实例后必须重建。
     private static volatile HttpClient sharedClient;
+    private static volatile Vertx sharedClientVertx;
     private static volatile boolean sharedClientShutdown = false;
 
     /**
@@ -70,6 +73,7 @@ public class JsHttpClient {
             if (sharedClient != null) {
                 sharedClient.close();
                 sharedClient = null;
+                sharedClientVertx = null;
             }
         }
     }
@@ -77,13 +81,23 @@ public class JsHttpClient {
     private static HttpClient sharedClient() {
         synchronized (SHARED_CLIENT_LOCK) {
             ensureSharedClientAvailable();
-            if (sharedClient == null) {
-                sharedClient = WebClientVertxInit.get().createHttpClient(
+            Vertx current = WebClientVertxInit.get();
+            if (sharedClient == null || sharedClientVertx != current) {
+                if (sharedClient != null) {
+                    // 持有器已换到别的 Vertx，旧 client 的 event loop 可能已经终止，不能再用
+                    try {
+                        sharedClient.close();
+                    } catch (Exception ignored) {
+                        // 关闭旧实例失败不影响重建
+                    }
+                }
+                sharedClient = current.createHttpClient(
                         new HttpClientOptions()
                                 .setConnectTimeout(10000)
                                 .setIdleTimeout(30)
                                 .setIdleTimeoutUnit(TimeUnit.SECONDS)
                                 .setMaxPoolSize(64));
+                sharedClientVertx = current;
             }
             return sharedClient;
         }

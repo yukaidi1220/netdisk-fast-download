@@ -10,6 +10,7 @@ import org.apache.commons.lang3.StringUtils;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * 认证参数编解码工具类
@@ -34,6 +35,9 @@ public class AuthParamCodec {
      */
     private static final String CONFIG_KEY_PATH = "authEncryptKey";
 
+    /** 默认密钥随源码公开，用到了就该让运维看见，但一次进程只提醒一次 */
+    private static final AtomicBoolean DEFAULT_KEY_WARNED = new AtomicBoolean(false);
+
     private AuthParamCodec() {
         // 工具类禁止实例化
     }
@@ -43,15 +47,19 @@ public class AuthParamCodec {
      * 优先从配置文件读取，如果未配置则使用默认密钥
      */
     public static String getEncryptKey() {
+        String key = DEFAULT_ENCRYPT_KEY;
         try {
             String configKey = SharedDataUtil.getJsonStringForServerConfig(CONFIG_KEY_PATH);
             if (StringUtils.isNotBlank(configKey)) {
-                return configKey;
+                key = configKey;
             }
         } catch (Exception e) {
             log.debug("从配置读取加密密钥失败，使用默认密钥: {}", e.getMessage());
         }
-        return DEFAULT_ENCRYPT_KEY;
+        if (DEFAULT_ENCRYPT_KEY.equals(key) && DEFAULT_KEY_WARNED.compareAndSet(false, true)) {
+            log.warn("认证参数加密密钥仍是源码里公开的默认值，等同未加密；请在 server 配置中把 {} 改为自定义随机值", CONFIG_KEY_PATH);
+        }
+        return key;
     }
 
     /**

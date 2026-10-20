@@ -1,7 +1,11 @@
 package cn.qaiu.parser;
 
+import cn.qaiu.WebClientVertxInit;
 import cn.qaiu.entity.ShareLinkInfo;
 import cn.qaiu.util.YeShareHostUtil;
+import io.vertx.core.Vertx;
+import org.junit.AfterClass;
+import org.junit.BeforeClass;
 import org.junit.Test;
 
 import java.util.Arrays;
@@ -22,6 +26,25 @@ import static org.junit.Assert.assertTrue;
  * Create at 2024/8/8 2:39
  */
 public class PanDomainTemplateTest {
+
+    private static Vertx vertx;
+
+    /**
+     * 本类的 fromShareUrl 会 createTool()，共享 HttpClient 取自 WebClientVertxInit 的持有器；
+     * 自己不装 Vertx 就只能依赖别的测试类留下的状态。
+     */
+    @BeforeClass
+    public static void initVertx() {
+        vertx = Vertx.vertx();
+        WebClientVertxInit.init(vertx);
+    }
+
+    @AfterClass
+    public static void closeVertx() {
+        if (vertx != null) {
+            vertx.close();
+        }
+    }
 
     @Test
     public void normalizeShareLink() {
